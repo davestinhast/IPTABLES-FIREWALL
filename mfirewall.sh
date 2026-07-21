@@ -1375,7 +1375,7 @@ main_menu() {
 
         printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;46m1)\e[0m  \e[1mActivar Firewall\e[0m  \e[2m— elegir sitios y aplicar reglas\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m2)\e[0m  Desactivar Firewall  \e[2m— eliminar todas las reglas activas\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m2)\e[0m  Desactivar Firewall  \e[2m— restaurar páginas web al estado normal\e[0m\n'
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;45m3)\e[0m  Bloqueo por MAC address  \e[2m— denegar equipos por hardware\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;45m4)\e[0m  Límite de conexiones  \e[2m— máx simultáneas por IP\e[0m\n'
