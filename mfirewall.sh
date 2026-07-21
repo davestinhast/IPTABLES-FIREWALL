@@ -799,83 +799,63 @@ deep_reset() {
 # =============================================================================
 show_status() {
     printf '\n'
-    printf '  \e[38;5;27m╔══════════════════════════════════════════════════════════╗\e[0m\n'
-    printf '  \e[38;5;27m║\e[0m  \e[1mEstado actual\e[0m'
-    printf '                                            \e[38;5;27m║\e[0m\n'
-    printf '  \e[38;5;27m╠══════════════════════════════════════════════════════════╣\e[0m\n'
+    printf '  \e[38;5;27m┌──────────────────────────────────────────┐\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[1mEstado actual\e[0m\n'
+    printf '  \e[38;5;27m├──────────────────────────────────────────┤\e[0m\n'
 
     local sites=("Facebook:$BLOCK_FACEBOOK" "YouTube:$BLOCK_YOUTUBE" "Hotmail:$BLOCK_HOTMAIL")
     for s in "${sites[@]}"; do
         IFS=':' read -r name val <<< "$s"
         if [[ "$val" == "true" ]]; then
-            printf '  \e[38;5;27m║\e[0m  %-10s  \e[38;5;46m● BLOQUEADO\e[0m' "$name"
-            printf '                                    \e[38;5;27m║\e[0m\n'
+            printf "  \e[38;5;27m│\e[0m  %-10s  \e[38;5;46m● BLOQUEADO\e[0m\n" "$name"
         else
-            printf '  \e[38;5;27m║\e[0m  %-10s  \e[38;5;240m○ permitido\e[0m' "$name"
-            printf '                                    \e[38;5;27m║\e[0m\n'
+            printf "  \e[38;5;27m│\e[0m  %-10s  \e[38;5;240m○ permitido\e[0m\n" "$name"
         fi
     done
-    printf '  \e[38;5;27m╠══════════════════════════════════════════════════════════╣\e[0m\n'
+    printf '  \e[38;5;27m├──────────────────────────────────────────┤\e[0m\n'
 
-    # ipsets
     for set_name in PM_FACEBOOK PM_YOUTUBE PM_HOTMAIL; do
         if ipset list "$set_name" &>/dev/null; then
             local cnt
             cnt=$(ipset list "$set_name" | grep -cE '^[0-9]+\.' 2>/dev/null || echo 0)
-            printf '  \e[38;5;27m║\e[0m  \e[38;5;46m%-15s  %3d IPs en ipset\e[0m' "$set_name" "$cnt"
-            printf '                          \e[38;5;27m║\e[0m\n'
+            printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-15s  %3d IPs\e[0m\n" "$set_name" "$cnt"
         else
-            printf '  \e[38;5;27m║\e[0m  \e[38;5;240m%-15s  no existe\e[0m' "$set_name"
-            printf '                                  \e[38;5;27m║\e[0m\n'
+            printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-15s  no existe\e[0m\n" "$set_name"
         fi
     done
-    printf '  \e[38;5;27m╠══════════════════════════════════════════════════════════╣\e[0m\n'
+    printf '  \e[38;5;27m├──────────────────────────────────────────┤\e[0m\n'
 
-    # /etc/hosts
     if grep -q "$HOSTS_MARKER_START" /etc/hosts 2>/dev/null; then
         local hcnt
         hcnt=$(sed -n "/$HOSTS_MARKER_START/,/$HOSTS_MARKER_END/p" /etc/hosts \
                | grep -c "^0.0.0.0" 2>/dev/null || echo 0)
-        printf '  \e[38;5;27m║\e[0m  \e[38;5;46m/etc/hosts       %3d entradas bloqueadas\e[0m' "$hcnt"
-        printf '               \e[38;5;27m║\e[0m\n'
+        printf "  \e[38;5;27m│\e[0m  \e[38;5;46m/etc/hosts       %3d entradas\e[0m\n" "$hcnt"
     else
-        printf '  \e[38;5;27m║\e[0m  \e[38;5;240m/etc/hosts       sin bloqueos\e[0m'
-        printf '                                \e[38;5;27m║\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m/etc/hosts       sin bloqueos\e[0m\n'
     fi
 
-    # Firefox policy
     local ff=false
     for dir in "${FIREFOX_POLICY_DIRS[@]}"; do
         [[ -f "$dir/policies.json" ]] && ff=true && break
     done
     if [[ "$ff" == true ]]; then
-        printf '  \e[38;5;27m║\e[0m  \e[38;5;46mFirefox DoH      deshabilitado (policy activa)\e[0m'
-        printf '      \e[38;5;27m║\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;46mFirefox DoH      deshabilitado\e[0m\n'
     else
-        printf '  \e[38;5;27m║\e[0m  \e[38;5;196mFirefox DoH      habilitado — bypass posible\e[0m'
-        printf '       \e[38;5;27m║\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;196mFirefox DoH      ACTIVO — bypass posible\e[0m\n'
     fi
 
-    printf '  \e[38;5;27m╠══════════════════════════════════════════════════════════╣\e[0m\n'
-    printf '  \e[38;5;27m║\e[0m  WAN: %-8s  LAN: %-8s' \
+    printf '  \e[38;5;27m├──────────────────────────────────────────┤\e[0m\n'
+    printf "  \e[38;5;27m│\e[0m  WAN: \e[38;5;51m%-10s\e[0m  LAN: \e[38;5;51m%s\e[0m\n" \
         "${WAN_IFACE:-—}" "${LAN_IFACE:-—}"
-    printf '                                  \e[38;5;27m║\e[0m\n'
-    [[ -n "$MAC_BLOCKS_STR" ]] && {
-        printf '  \e[38;5;27m║\e[0m  MACs: %s' "$MAC_BLOCKS_STR"
-        printf '                                            \e[38;5;27m║\e[0m\n'
-    }
-    [[ -n "$CONN_LIMITS_STR" ]] && {
-        printf '  \e[38;5;27m║\e[0m  Límites: %s' "$CONN_LIMITS_STR"
-        printf '                                        \e[38;5;27m║\e[0m\n'
-    }
-    printf '  \e[38;5;27m╚══════════════════════════════════════════════════════════╝\e[0m\n'
-    printf '\n'
+    [[ -n "$MAC_BLOCKS_STR" ]] && \
+        printf "  \e[38;5;27m│\e[0m  MACs: \e[38;5;214m%s\e[0m\n" "$MAC_BLOCKS_STR"
+    [[ -n "$CONN_LIMITS_STR" ]] && \
+        printf "  \e[38;5;27m│\e[0m  Limites: \e[38;5;214m%s\e[0m\n" "$CONN_LIMITS_STR"
+    printf '  \e[38;5;27m└──────────────────────────────────────────┘\e[0m\n\n'
 
-    # PM_WEBBLOCK chain si existe
     if iptables -L PM_WEBBLOCK -n 2>/dev/null | grep -q "target"; then
-        printf '  \e[2mCadena PM_WEBBLOCK activa:\e[0m\n'
-        iptables -L PM_WEBBLOCK -n --line-numbers 2>/dev/null \
-            | sed 's/^/  /'
+        printf '  \e[2mPM_WEBBLOCK:\e[0m\n'
+        iptables -L PM_WEBBLOCK -n --line-numbers 2>/dev/null | sed 's/^/  /'
         printf '\n'
     fi
 }
@@ -926,17 +906,17 @@ toggle_var() {
 # =============================================================================
 menu_sites() {
     while true; do
+        clear
         printf '\n'
-        printf '  \e[38;5;27m╔══════════════════════════════════════╗\e[0m\n'
-        printf '  \e[38;5;27m║\e[0m  \e[1mSitios Bloqueados\e[0m'
-        printf '                      \e[38;5;27m║\e[0m\n'
-        printf '  \e[38;5;27m╠══════════════════════════════════════╣\e[0m\n'
-        printf '  \e[38;5;27m║\e[0m  \e[1m1)\e[0m Facebook   [$(toggle_label "$BLOCK_FACEBOOK")]   \e[38;5;27m║\e[0m\n'
-        printf '  \e[38;5;27m║\e[0m  \e[1m2)\e[0m YouTube    [$(toggle_label "$BLOCK_YOUTUBE")]   \e[38;5;27m║\e[0m\n'
-        printf '  \e[38;5;27m║\e[0m  \e[1m3)\e[0m Hotmail    [$(toggle_label "$BLOCK_HOTMAIL")]   \e[38;5;27m║\e[0m\n'
-        printf '  \e[38;5;27m║\e[0m  \e[1m0)\e[0m Volver'
-        printf '                             \e[38;5;27m║\e[0m\n'
-        printf '  \e[38;5;27m╚══════════════════════════════════════╝\e[0m\n\n'
+        printf '  \e[38;5;27m┌──────────────────────────────────────┐\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mSitios Bloqueados\e[0m\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
+        echo -e "  \e[38;5;27m│\e[0m  \e[1m1)\e[0m  Facebook   [$(toggle_label "$BLOCK_FACEBOOK")]"
+        echo -e "  \e[38;5;27m│\e[0m  \e[1m2)\e[0m  YouTube    [$(toggle_label "$BLOCK_YOUTUBE")]"
+        echo -e "  \e[38;5;27m│\e[0m  \e[1m3)\e[0m  Hotmail    [$(toggle_label "$BLOCK_HOTMAIL")]"
+        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Volver\n'
+        printf '  \e[38;5;27m└──────────────────────────────────────┘\e[0m\n\n'
         read -rp "  Opción: " opt
         case "$opt" in
             1) toggle_var BLOCK_FACEBOOK; save_config ;;
@@ -1060,36 +1040,25 @@ main_menu() {
         clear
         draw_banner_static
 
-        # Estado en línea
-        printf '  Estado: FB=[$(toggle_label "$BLOCK_FACEBOOK")]  '
-        printf 'YT=[$(toggle_label "$BLOCK_YOUTUBE")]  '
-        printf 'HM=[$(toggle_label "$BLOCK_HOTMAIL")]\n\n'
+        # Estado — evaluado correctamente con double quotes
+        echo -e "  \e[2mFB:\e[0m $(toggle_label "$BLOCK_FACEBOOK")   \e[2mYT:\e[0m $(toggle_label "$BLOCK_YOUTUBE")   \e[2mHM:\e[0m $(toggle_label "$BLOCK_HOTMAIL")"
+        printf '\n'
 
-        printf '  \e[38;5;27m┌──────────────────────────────────────────────────────────┐\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;51m1)\e[0m  \e[1mActivar firewall\e[0m'
-        printf '                                   \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;51m2)\e[0m  Desactivar firewall'
-        printf '                                \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m3)\e[0m  Configurar sitios bloqueados'
-        printf '                       \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m4)\e[0m  Configurar interfaces (WAN/LAN)'
-        printf '                   \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m5)\e[0m  Bloqueo por MAC'
-        printf '                                   \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m6)\e[0m  Límites de conexión'
-        printf '                               \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m7)\e[0m  Ver estado actual'
-        printf '                                 \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m8)\e[0m  Ver logs'
-        printf '                                         \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m9)\e[0m  Reset total de red'
-        printf '                                \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Salir'
-        printf '                                             \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m└──────────────────────────────────────────────────────────┘\e[0m\n'
+        printf '  \e[38;5;27m┌──────────────────────────────────────┐\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;51m1)\e[0m  \e[1mActivar firewall\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;51m2)\e[0m  Desactivar firewall\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m3)\e[0m  Configurar sitios bloqueados\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m4)\e[0m  Configurar interfaces (WAN/LAN)\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m5)\e[0m  Bloqueo por MAC\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m6)\e[0m  Limites de conexion\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m7)\e[0m  Ver estado actual\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m8)\e[0m  Ver logs\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m9)\e[0m  Reset total de red\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Salir\n'
+        printf '  \e[38;5;27m└──────────────────────────────────────┘\e[0m\n'
         printf '\n'
 
         read -rp "  Opción: " choice
