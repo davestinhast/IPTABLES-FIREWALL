@@ -39,6 +39,11 @@ BLOCK_FACEBOOK="false"; BLOCK_YOUTUBE="false"; BLOCK_HOTMAIL="false"
 WAN_IFACE=""; LAN_IFACE=""
 MAC_BLOCKS_STR=""; CONN_LIMITS_STR=""
 
+# ─── DNS Proxy (Python3, intercepta queries antes del browser) ─────────────────
+DNS_PROXY_PID_FILE="/var/run/mfirewall-dnsproxy.pid"
+DNS_PROXY_PORT=5353
+DNS_PROXY_SCRIPT="/tmp/mfirewall_dnsproxy.py"
+
 # ─── Dominios ─────────────────────────────────────────────────────────────────
 DOMAINS_FACEBOOK=(
     "facebook.com" "www.facebook.com" "m.facebook.com"
@@ -832,6 +837,146 @@ flush_dns() {
 }
 
 # =============================================================================
+# DNS PROXY — Python3 intercepta queries DNS antes de que el browser las resuelva
+# Retorna NXDOMAIN para dominios bloqueados; reenvía todo lo demás al upstream real.
+# Esto mata el problema de Firefox internal DNS cache: eventualmente tiene que
+# renovar y ahí nuestro proxy lo bloquea. Combinado con pkill firefox, es inmediato.
+# =============================================================================
+
+_write_dns_proxy_script() {
+    cat > "$DNS_PROXY_SCRIPT" << 'PYEOF'
+#!/usr/bin/env python3
+"""M-FIREWALL DNS proxy — retorna NXDOMAIN para dominios bloqueados."""
+import sys, socket, threading, signal
+
+upstream  = sys.argv[1]
+port      = int(sys.argv[2])
+blocked   = [k.lower() for k in sys.argv[3].split(',') if k.strip()]
+
+def nxdomain(data):
+    """Construye respuesta DNS NXDOMAIN (RCODE=3) a partir del query original."""
+    if len(data) < 12:
+        return data
+    return (data[:2]            # Transaction ID (2 bytes)
+            + b'\x81\x83'       # Flags: QR=1 AA=0 TC=0 RD=1 RA=1 RCODE=3(NXDOMAIN)
+            + data[4:6]         # QDCOUNT del query original
+            + b'\x00\x00'       # ANCOUNT = 0
+            + b'\x00\x00'       # NSCOUNT = 0
+            + b'\x00\x00'       # ARCOUNT = 0
+            + data[12:])        # Question section original
+
+def handle(data, addr, sock):
+    payload = data.lower()
+    if any(kw.encode() in payload for kw in blocked):
+        try:
+            sock.sendto(nxdomain(data), addr)
+        except Exception:
+            pass
+        return
+    # Reenviar al upstream real
+    up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    up.settimeout(3.0)
+    try:
+        up.sendto(data, (upstream, 53))
+        resp, _ = up.recvfrom(4096)
+        sock.sendto(resp, addr)
+    except Exception:
+        try:
+            sock.sendto(nxdomain(data), addr)
+        except Exception:
+            pass
+    finally:
+        up.close()
+
+def main():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('127.0.0.1', port))
+    signal.signal(signal.SIGTERM, lambda *_: (sock.close(), sys.exit(0)))
+    while True:
+        try:
+            data, addr = sock.recvfrom(4096)
+            threading.Thread(target=handle, args=(data, addr, sock),
+                             daemon=True).start()
+        except OSError:
+            break
+
+if __name__ == '__main__':
+    main()
+PYEOF
+    chmod +x "$DNS_PROXY_SCRIPT"
+}
+
+setup_dns_proxy() {
+    logsec "DNS proxy Python3 (intercepta port 53 antes del browser)"
+
+    # Detectar upstream DNS real — evitar loopbacks (127.x.x.x)
+    local _up
+    _up=$(awk '/^nameserver/ && $2 !~ /^127\./{print $2; exit}' \
+          /run/systemd/resolve/resolv.conf 2>/dev/null)
+    [[ -z "$_up" ]] && \
+        _up=$(awk '/^nameserver/ && $2 !~ /^127\./{print $2; exit}' \
+              /etc/resolv.conf 2>/dev/null)
+    [[ -z "$_up" ]] && _up="8.8.8.8"
+
+    # Construir lista de keywords a bloquear (CSV para pasarle a Python)
+    local -a _kws=()
+    [[ "$BLOCK_YOUTUBE"  == "true" ]] && \
+        _kws+=(youtube googlevideo ytimg youtu youtube-nocookie youtubei)
+    [[ "$BLOCK_FACEBOOK" == "true" ]] && \
+        _kws+=(facebook fbcdn messenger instagram fbsbx fb.com)
+    [[ "$BLOCK_HOTMAIL"  == "true" ]] && \
+        _kws+=(hotmail outlook microsoftonline live.com office365)
+    # Bloquear DoH providers siempre — evita que Firefox bypasee con HTTPS DNS
+    _kws+=(dns.google cloudflare-dns dns.quad9 use-application-dns)
+    local _csv
+    _csv=$(IFS=','; echo "${_kws[*]}")
+
+    # Matar instancia previa si existe
+    if [[ -f "$DNS_PROXY_PID_FILE" ]]; then
+        kill "$(cat "$DNS_PROXY_PID_FILE")" 2>/dev/null || true
+        rm -f "$DNS_PROXY_PID_FILE"
+    fi
+
+    # Escribir y arrancar el proxy en background (cmd() no soporta &)
+    _write_dns_proxy_script
+    [[ -n "$CMD_LOG" ]] && printf '[%s] [CMD] python3 %s %s %s %s &\n' \
+        "$(date +%H:%M:%S)" "$DNS_PROXY_SCRIPT" "$_up" "$DNS_PROXY_PORT" "$_csv" >> "$CMD_LOG"
+    python3 "$DNS_PROXY_SCRIPT" "$_up" "$DNS_PROXY_PORT" "$_csv" &
+    local _pid=$!
+    disown "$_pid"  # evita que bash lo mate al volver al menú
+    echo "$_pid" > "$DNS_PROXY_PID_FILE"
+    sleep 0.5
+
+    # REDIRECT toda consulta DNS (excepto al upstream real para evitar bucle)
+    cmd iptables -t nat -I OUTPUT 1 -p udp --dport 53 -d "$_up" -j RETURN
+    cmd iptables -t nat -I OUTPUT 2 -p udp --dport 53 -j REDIRECT --to-ports "$DNS_PROXY_PORT"
+    cmd iptables -t nat -I OUTPUT 3 -p tcp --dport 53 -d "$_up" -j RETURN
+    cmd iptables -t nat -I OUTPUT 4 -p tcp --dport 53 -j REDIRECT --to-ports "$DNS_PROXY_PORT"
+
+    # Matar Firefox — CRÍTICO para vaciar su caché DNS interno
+    # Sin esto, Firefox sigue usando IPs cacheadas aunque bloqueemos DNS
+    pkill -f "firefox" 2>/dev/null || true
+    sleep 0.3
+
+    logc "DNS proxy PID=$_pid · upstream=$_up · bloqueando: ${_kws[*]}"
+}
+
+teardown_dns_proxy() {
+    logsec "Deteniendo DNS proxy"
+    if [[ -f "$DNS_PROXY_PID_FILE" ]]; then
+        local _pid
+        _pid=$(cat "$DNS_PROXY_PID_FILE")
+        cmd kill "$_pid" 2>/dev/null || true
+        rm -f "$DNS_PROXY_PID_FILE"
+    fi
+    # Matar cualquier instancia huérfana del script
+    pkill -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
+    rm -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
+    logc "DNS proxy detenido"
+}
+
+# =============================================================================
 # ENABLE
 # =============================================================================
 enable_firewall() {
@@ -853,7 +998,7 @@ enable_firewall() {
     printf '\n\n'
 
     # Calcular total de pasos
-    local total=6  # base + ipsets + SNI + DNS-hex + hosts + firefox
+    local total=7  # base + ipsets + SNI + DNS-hex + DNS-proxy + hosts + firefox
     [[ "$BLOCK_FACEBOOK" == "true" ]] && (( total++ ))
     [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && (( total++ ))
@@ -898,6 +1043,9 @@ enable_firewall() {
     (( step++ )); run_step $step $total "Bloqueando DNS por dominio (port 53)" apply_dns_block
     draw_progress_bar $step $total
 
+    (( step++ )); run_step $step $total "DNS proxy local (bloqueo garantizado)" setup_dns_proxy
+    draw_progress_bar $step $total
+
     (( step++ )); run_step $step $total "Inyectando /etc/hosts" apply_all_hosts
     draw_progress_bar $step $total
 
@@ -925,7 +1073,7 @@ disable_firewall() {
     gradient_print "  Desactivando M-FIREWALL..." GRAD[@] 4
     printf '\n\n'
 
-    local total=5 step=0
+    local total=6 step=0
 
     _flush_chains() {
         for chain in PM_REJECT PM_WEBBLOCK PM_MACBLOCK PM_CONNLIMIT; do
@@ -940,6 +1088,9 @@ disable_firewall() {
         iptables -t nat -F OUTPUT     2>/dev/null || true
         logc "Cadenas eliminadas"
     }
+
+    (( step++ )); run_step $step $total "Deteniendo DNS proxy" teardown_dns_proxy
+    draw_progress_bar $step $total
 
     (( step++ )); run_step $step $total "Eliminando reglas iptables" _flush_chains
     draw_progress_bar $step $total
