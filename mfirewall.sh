@@ -527,59 +527,190 @@ setup_base_chains() {
 }
 
 # =============================================================================
-# BLOQUEADORES
+# BLOQUEADOR ANIMADO — targeting de IPs en tiempo real
 # =============================================================================
-block_facebook() {
-    logsec "FACEBOOK"
-    mapfile -t _fb_ips < <(resolve_site_ips DOMAINS_FACEBOOK)
-    logc "${#_fb_ips[@]} IPs resueltas"
-    cmd ipset create PM_FACEBOOK hash:ip family inet hashsize 1024 maxelem 65536 -exist
-    cmd ipset flush PM_FACEBOOK
-    local ip; for ip in "${_fb_ips[@]}"; do cmd ipset add PM_FACEBOOK "$ip" -exist; done
-    cmd iptables -A PM_WEBBLOCK -p tcp --dport 80  \
-        -m set --match-set PM_FACEBOOK dst -j PM_REJECT
-    cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
-        -m set --match-set PM_FACEBOOK dst -j PM_REJECT
-    logc "Facebook bloqueado: ${#_fb_ips[@]} IPs"
-}
 
-block_hotmail() {
-    logsec "HOTMAIL / OUTLOOK"
-    mapfile -t _hm_ips < <(resolve_site_ips DOMAINS_HOTMAIL)
-    logc "${#_hm_ips[@]} IPs resueltas"
-    cmd ipset create PM_HOTMAIL hash:ip family inet hashsize 1024 maxelem 65536 -exist
-    cmd ipset flush PM_HOTMAIL
-    local ip; for ip in "${_hm_ips[@]}"; do cmd ipset add PM_HOTMAIL "$ip" -exist; done
-    cmd iptables -A PM_WEBBLOCK -p tcp --dport 80  \
-        -m set --match-set PM_HOTMAIL dst -j PM_REJECT
-    cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
-        -m set --match-set PM_HOTMAIL dst -j PM_REJECT
-    logc "Hotmail bloqueado: ${#_hm_ips[@]} IPs"
-}
+# _animated_block_site step total name set_name domain_var_name [proto:port ...]
+# Los proto:port con sufijo ":any" no usan match-set (ej: para DoT global)
+_animated_block_site() {
+    local step_n="$1" total="$2" name="$3" set_name="$4" domain_var="$5"
+    shift 5
+    local rules=("$@")
 
-block_youtube() {
-    logsec "YOUTUBE"
-    local -A _seen; local _yt_ips=(); local ip domain
-    for domain in "${YT_IPSET_DOMAINS[@]}"; do
-        while IFS= read -r ip; do
-            if [[ -n "$ip" && -z "${_seen[$ip]+x}" ]]; then
-                _seen[$ip]=1; _yt_ips+=("$ip")
+    printf '\n'
+
+    # ── Spinner durante resolución DNS ────────────────────────────────────
+    (
+        local F=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+        local f=0
+        while true; do
+            printf "\r  \e[38;5;39m[%d/%d]\e[0m \e[38;5;51m%s\e[0m Resolviendo %s..." \
+                "$step_n" "$total" "${F[$f]}" "$name"
+            f=$(( (f+1) % ${#F[@]} ))
+            sleep 0.08
+        done
+    ) &
+    local _spid=$!
+
+    # Resolver IPs
+    local -n _adom=$domain_var
+    local -A _aseen; local _aips=(); local _aip _adom_entry
+    for _adom_entry in "${_adom[@]}"; do
+        while IFS= read -r _aip; do
+            if [[ -n "$_aip" && -z "${_aseen[$_aip]+x}" ]]; then
+                _aseen[$_aip]=1; _aips+=("$_aip")
             fi
-        done < <(resolve_domain_ips "$domain")
+        done < <(resolve_domain_ips "$_adom_entry")
     done
-    logc "${#_yt_ips[@]} IPs resueltas"
-    cmd ipset create PM_YOUTUBE hash:ip family inet hashsize 1024 maxelem 65536 -exist
-    cmd ipset flush PM_YOUTUBE
-    for ip in "${_yt_ips[@]}"; do cmd ipset add PM_YOUTUBE "$ip" -exist; done
-    cmd iptables -A PM_WEBBLOCK -p tcp --dport 80  \
-        -m set --match-set PM_YOUTUBE dst -j PM_REJECT
-    cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
-        -m set --match-set PM_YOUTUBE dst -j PM_REJECT
-    cmd iptables -A PM_WEBBLOCK -p udp --dport 443 \
-        -m set --match-set PM_YOUTUBE dst -j PM_REJECT
-    cmd iptables -A PM_WEBBLOCK -p tcp --dport 853 -j PM_REJECT
-    cmd iptables -A PM_WEBBLOCK -p udp --dport 853 -j PM_REJECT
-    logc "YouTube bloqueado: ipset + QUIC + DoT"
+
+    kill "$_spid" 2>/dev/null; wait "$_spid" 2>/dev/null
+
+    printf "\r  \e[38;5;46m[%d/%d] ✓\e[0m  Resolviendo %-10s  \e[38;5;240m%d IPs encontradas\e[0m%*s\n" \
+        "$step_n" "$total" "$name" "${#_aips[@]}" 10 ""
+
+    # ── Panel de targeting ────────────────────────────────────────────────
+    printf "\n  \e[38;5;27m╭── \e[38;5;51m%s\e[0m \e[38;5;240m(%d IPs)\e[0m \e[38;5;27m" "$set_name" "${#_aips[@]}"
+    printf '%.0s─' {1..30}
+    printf '╮\e[0m\n'
+
+    local shown=0 max_show=12
+    for _aip in "${_aips[@]}"; do
+        if [[ $shown -lt $max_show ]]; then
+            printf "  \e[38;5;27m│\e[0m  \e[38;5;240m▶\e[0m  \e[38;5;51m%-18s\e[0m \e[38;5;27m→\e[0m \e[38;5;196m%-15s\e[0m  \e[38;5;46m✓\e[0m\n" \
+                "$_aip" "$set_name"
+            sleep 0.025
+        fi
+        (( shown++ ))
+    done
+
+    local _remaining=$(( ${#_aips[@]} - max_show ))
+    [[ $_remaining -gt 0 ]] && \
+        printf "  \e[38;5;27m│\e[0m  \e[38;5;240m    ··· y %d IPs más cargadas\e[0m\n" "$_remaining"
+
+    printf "  \e[38;5;27m╰"
+    printf '%.0s─' {1..46}
+    printf '╯\e[0m\n\n'
+
+    # ── Aplicar ipset ────────────────────────────────────────────────────
+    cmd ipset create "$set_name" hash:ip family inet hashsize 1024 maxelem 65536 -exist
+    cmd ipset flush "$set_name"
+    for _aip in "${_aips[@]}"; do cmd ipset add "$set_name" "$_aip" -exist; done
+
+    # ── Aplicar reglas iptables ───────────────────────────────────────────
+    for rule in "${rules[@]}"; do
+        IFS=':' read -r _proto _port _mode <<< "$rule"
+        if [[ "$_mode" == "any" ]]; then
+            cmd iptables -A PM_WEBBLOCK -p "$_proto" --dport "$_port" -j PM_REJECT
+        else
+            cmd iptables -A PM_WEBBLOCK -p "$_proto" --dport "$_port" \
+                -m set --match-set "$set_name" dst -j PM_REJECT
+        fi
+    done
+
+    logc "$name bloqueado: ${#_aips[@]} IPs en $set_name"
+}
+
+# =============================================================================
+# DASHBOARD EN VIVO (opción 7)
+# =============================================================================
+show_dashboard() {
+    tput smcup  2>/dev/null
+    tput civis
+    stty -echo  2>/dev/null
+
+    local quit=false
+
+    while [[ "$quit" == false ]]; do
+        tput home
+        printf '\n'
+
+        local now
+        now=$(date '+%H:%M:%S')
+
+        # Header con hora
+        gradient_print "  ╭── M-FIREWALL  $now ─────────────────────────────────────────╮" GRAD[@] 0
+        printf '\n'
+
+        # Sitios
+        printf '  \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mSITIOS\e[0m\n'
+        for _dinfo in "Facebook:$BLOCK_FACEBOOK:PM_FACEBOOK" \
+                      "YouTube:$BLOCK_YOUTUBE:PM_YOUTUBE" \
+                      "Hotmail:$BLOCK_HOTMAIL:PM_HOTMAIL"; do
+            IFS=':' read -r _dname _dstatus _dset <<< "$_dinfo"
+            if [[ "$_dstatus" == "true" ]]; then
+                local _dcnt=0
+                ipset list "$_dset" &>/dev/null && \
+                    _dcnt=$(ipset list "$_dset" 2>/dev/null | grep -cE '^[0-9]+\.' || echo 0)
+                printf "  \e[38;5;27m│\e[0m  \e[38;5;46m●\e[0m  %-10s  \e[38;5;46mBLOQUEADO\e[0m   \e[38;5;240m%s  %d IPs\e[0m\n" \
+                    "$_dname" "$_dset" "$_dcnt"
+            else
+                printf "  \e[38;5;27m│\e[0m  \e[38;5;240m○  %-10s  permitido\e[0m\n" "$_dname"
+            fi
+        done
+
+        # Capas
+        printf '  \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mCAPAS DE BLOQUEO\e[0m\n'
+
+        if grep -q "$HOSTS_MARKER_START" /etc/hosts 2>/dev/null; then
+            local _hcnt
+            _hcnt=$(sed -n "/$HOSTS_MARKER_START/,/$HOSTS_MARKER_END/p" /etc/hosts \
+                    | grep -c "^0.0.0.0" 2>/dev/null || echo 0)
+            printf "  \e[38;5;27m│\e[0m  \e[38;5;46m●\e[0m  /etc/hosts       %d entradas bloqueadas\n" "$_hcnt"
+        else
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;240m○  /etc/hosts       inactivo\e[0m\n'
+        fi
+
+        local _ff=false
+        for _ffd in "${FIREFOX_POLICY_DIRS[@]}"; do
+            [[ -f "$_ffd/policies.json" ]] && _ff=true && break
+        done
+        if [[ "$_ff" == true ]]; then
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;46m●\e[0m  Firefox DoH      deshabilitado\n'
+        else
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;196m●\e[0m  Firefox DoH      \e[38;5;196mACTIVO — bypass posible\e[0m\n'
+        fi
+
+        # Actividad reciente
+        printf '  \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mACTIVIDAD RECIENTE  (PM-DROP)\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m\n'
+
+        local _drops=""
+        if command -v journalctl &>/dev/null; then
+            _drops=$(journalctl -k --no-pager -n 10 2>/dev/null | grep "PM-DROP" | tail -6)
+        else
+            _drops=$(dmesg 2>/dev/null | grep "PM-DROP" | tail -6)
+        fi
+
+        if [[ -n "$_drops" ]]; then
+            while IFS= read -r _dline; do
+                local _src _dst _ts
+                _src=$(printf '%s' "$_dline" | grep -oP 'SRC=\K[^ ]+' || echo "?")
+                _dst=$(printf '%s' "$_dline" | grep -oP 'DST=\K[^ ]+' || echo "?")
+                _ts=$(printf '%s' "$_dline" | grep -oP '\d+:\d+:\d+' | head -1 || echo "--:--:--")
+                printf "  \e[38;5;27m│\e[0m  \e[38;5;196m✗ DROP\e[0m  \e[38;5;240m%s\e[0m  \e[38;5;51m%-16s\e[0m \e[38;5;27m→\e[0m \e[38;5;214m%s\e[0m\n" \
+                    "$_ts" "$_src" "$_dst"
+            done <<< "$_drops"
+        else
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;240m  Sin actividad registrada aún.\e[0m\n'
+        fi
+
+        printf '  \e[38;5;27m│\e[0m\n'
+        gradient_print "  ╰──────────────────────────────────────────────────────────────╯" GRAD[@] 4
+        printf '\n'
+        printf '  \e[2mActualiza cada 3s  ·  [q] salir\e[0m\n'
+
+        if read -t 3 -n 1 _key 2>/dev/null; then
+            [[ "$_key" == "q" || "$_key" == "Q" ]] && quit=true
+        fi
+    done
+
+    tput rmcup 2>/dev/null
+    tput cnorm
+    stty echo 2>/dev/null
 }
 
 apply_mac_blocks() {
@@ -650,15 +781,21 @@ enable_firewall() {
     draw_progress_bar $step $total
 
     if [[ "$BLOCK_FACEBOOK" == "true" ]]; then
-        (( step++ )); run_step $step $total "Bloqueando Facebook" block_facebook
+        (( step++ ))
+        _animated_block_site $step $total "Facebook" "PM_FACEBOOK" DOMAINS_FACEBOOK \
+            "tcp:80" "tcp:443"
         draw_progress_bar $step $total
     fi
     if [[ "$BLOCK_YOUTUBE" == "true" ]]; then
-        (( step++ )); run_step $step $total "Bloqueando YouTube" block_youtube
+        (( step++ ))
+        _animated_block_site $step $total "YouTube" "PM_YOUTUBE" YT_IPSET_DOMAINS \
+            "tcp:80" "tcp:443" "udp:443" "tcp:853:any" "udp:853:any"
         draw_progress_bar $step $total
     fi
     if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
-        (( step++ )); run_step $step $total "Bloqueando Hotmail/Outlook" block_hotmail
+        (( step++ ))
+        _animated_block_site $step $total "Hotmail" "PM_HOTMAIL" DOMAINS_HOTMAIL \
+            "tcp:80" "tcp:443"
         draw_progress_bar $step $total
     fi
     if [[ -n "$MAC_BLOCKS_STR" ]]; then
@@ -799,7 +936,7 @@ deep_reset() {
 # =============================================================================
 show_status() {
     printf '\n'
-    printf '  \e[38;5;27m┌──────────────────────────────────────────┐\e[0m\n'
+    printf '  \e[38;5;27m╭──────────────────────────────────────────╮\e[0m\n'
     printf '  \e[38;5;27m│\e[0m  \e[1mEstado actual\e[0m\n'
     printf '  \e[38;5;27m├──────────────────────────────────────────┤\e[0m\n'
 
@@ -851,7 +988,7 @@ show_status() {
         printf "  \e[38;5;27m│\e[0m  MACs: \e[38;5;214m%s\e[0m\n" "$MAC_BLOCKS_STR"
     [[ -n "$CONN_LIMITS_STR" ]] && \
         printf "  \e[38;5;27m│\e[0m  Limites: \e[38;5;214m%s\e[0m\n" "$CONN_LIMITS_STR"
-    printf '  \e[38;5;27m└──────────────────────────────────────────┘\e[0m\n\n'
+    printf '  \e[38;5;27m╰──────────────────────────────────────────╯\e[0m\n\n'
 
     if iptables -L PM_WEBBLOCK -n 2>/dev/null | grep -q "target"; then
         printf '  \e[2mPM_WEBBLOCK:\e[0m\n'
@@ -908,7 +1045,7 @@ menu_sites() {
     while true; do
         clear
         printf '\n'
-        printf '  \e[38;5;27m┌──────────────────────────────────────┐\e[0m\n'
+        printf '  \e[38;5;27m╭──────────────────────────────────────╮\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[1mSitios Bloqueados\e[0m\n'
         printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
         echo -e "  \e[38;5;27m│\e[0m  \e[1m1)\e[0m  Facebook   [$(toggle_label "$BLOCK_FACEBOOK")]"
@@ -916,7 +1053,7 @@ menu_sites() {
         echo -e "  \e[38;5;27m│\e[0m  \e[1m3)\e[0m  Hotmail    [$(toggle_label "$BLOCK_HOTMAIL")]"
         printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Volver\n'
-        printf '  \e[38;5;27m└──────────────────────────────────────┘\e[0m\n\n'
+        printf '  \e[38;5;27m╰──────────────────────────────────────╯\e[0m\n\n'
         read -rp "  Opción: " opt
         case "$opt" in
             1) toggle_var BLOCK_FACEBOOK; save_config ;;
@@ -1044,7 +1181,7 @@ main_menu() {
         echo -e "  \e[2mFB:\e[0m $(toggle_label "$BLOCK_FACEBOOK")   \e[2mYT:\e[0m $(toggle_label "$BLOCK_YOUTUBE")   \e[2mHM:\e[0m $(toggle_label "$BLOCK_HOTMAIL")"
         printf '\n'
 
-        printf '  \e[38;5;27m┌──────────────────────────────────────┐\e[0m\n'
+        printf '  \e[38;5;27m╭──────────────────────────────────────╮\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;51m1)\e[0m  \e[1mActivar firewall\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;51m2)\e[0m  Desactivar firewall\n'
         printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
@@ -1053,12 +1190,12 @@ main_menu() {
         printf '  \e[38;5;27m│\e[0m  \e[38;5;45m5)\e[0m  Bloqueo por MAC\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;45m6)\e[0m  Limites de conexion\n'
         printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m7)\e[0m  Ver estado actual\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m7)\e[0m  Dashboard en vivo\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;39m8)\e[0m  Ver logs\n'
         printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;196m9)\e[0m  Reset total de red\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Salir\n'
-        printf '  \e[38;5;27m└──────────────────────────────────────┘\e[0m\n'
+        printf '  \e[38;5;27m╰──────────────────────────────────────╯\e[0m\n'
         printf '\n'
 
         read -rp "  Opción: " choice
@@ -1070,7 +1207,7 @@ main_menu() {
             4) menu_interfaces; read -rp $'\n  Presiona Enter...' ;;
             5) menu_mac ;;
             6) menu_connlimit ;;
-            7) show_status;  read -rp $'\n  Presiona Enter...' ;;
+            7) show_dashboard ;;
             8) show_logs;    read -rp $'\n  Presiona Enter...' ;;
             9) deep_reset;   read -rp $'\n  Presiona Enter...' ;;
             0) printf '\n'; gradient_print "  Hasta luego." GRAD[@] 0; printf '\n\n'; exit 0 ;;
