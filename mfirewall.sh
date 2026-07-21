@@ -531,6 +531,47 @@ setup_base_chains() {
 }
 
 # =============================================================================
+# DNS WIRE-PROTOCOL BLOCKING — bloquea queries DNS antes de que el browser
+# reciba la IP. Hex-string coincide con la codificación DNS del dominio:
+# "youtube.com" → \x07youtube\x03com (longitud + etiqueta + longitud + etiqueta)
+# Esto atrapa browsers que bypassean /etc/hosts pero no pueden bypassear el kernel.
+# =============================================================================
+apply_dns_block() {
+    logsec "DNS hex-string blocking (port 53)"
+    # Patrones hex para cada sitio (longitud en hex + label ASCII)
+    local _dns_rules=()
+
+    if [[ "$BLOCK_FACEBOOK" == "true" ]]; then
+        _dns_rules+=("|08|facebook|03|com")
+        _dns_rules+=("|05|fbcdn|03|net")
+        _dns_rules+=("|09|messenger|03|com")
+        _dns_rules+=("|09|instagram|03|com")
+    fi
+    if [[ "$BLOCK_YOUTUBE" == "true" ]]; then
+        _dns_rules+=("|07|youtube|03|com")
+        _dns_rules+=("|0b|googlevideo|03|com")
+        _dns_rules+=("|05|ytimg|03|com")
+        _dns_rules+=("|06|youtu|02|be")
+    fi
+    if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
+        _dns_rules+=("|07|hotmail|03|com")
+        _dns_rules+=("|07|outlook|03|com")
+        _dns_rules+=("|0f|microsoftonline|03|com")
+        _dns_rules+=("|04|live|03|com")
+    fi
+
+    local _hex
+    for _hex in "${_dns_rules[@]}"; do
+        # OUTPUT: DNS del propio servidor/máquina
+        cmd iptables -A PM_WEBBLOCK -p udp --dport 53 \
+            -m string --hex-string "$_hex" --algo bm -j PM_REJECT
+        cmd iptables -A PM_WEBBLOCK -p tcp --dport 53 \
+            -m string --hex-string "$_hex" --algo bm -j PM_REJECT
+    done
+    logc "DNS blocking: ${#_dns_rules[@]} patrones en port 53"
+}
+
+# =============================================================================
 # SNI BLOCKING — coincide con nombre de dominio en TLS ClientHello (texto plano)
 # Funciona aunque las IPs de YouTube roten en Anycast de Google
 # =============================================================================
@@ -812,7 +853,7 @@ enable_firewall() {
     printf '\n\n'
 
     # Calcular total de pasos
-    local total=5  # base + SNI + hosts + firefox + dns
+    local total=6  # base + ipsets + SNI + DNS-hex + hosts + firefox
     [[ "$BLOCK_FACEBOOK" == "true" ]] && (( total++ ))
     [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && (( total++ ))
@@ -852,6 +893,9 @@ enable_firewall() {
     fi
 
     (( step++ )); run_step $step $total "Aplicando bloqueo SNI (TLS)" apply_sni_rules
+    draw_progress_bar $step $total
+
+    (( step++ )); run_step $step $total "Bloqueando DNS por dominio (port 53)" apply_dns_block
     draw_progress_bar $step $total
 
     (( step++ )); run_step $step $total "Inyectando /etc/hosts" apply_all_hosts
@@ -912,6 +956,12 @@ disable_firewall() {
     printf '[%s] FIREWALL DESACTIVADO\n' "$(date)" >> "$LOG_FILE" 2>/dev/null || true
     close_cmd_terminal
     disable_screen
+
+    # Resetear config para que dashboard y wizard arranquen limpios
+    BLOCK_FACEBOOK="false"
+    BLOCK_YOUTUBE="false"
+    BLOCK_HOTMAIL="false"
+    save_config
 }
 
 # =============================================================================
@@ -1087,9 +1137,9 @@ toggle_var() {
 
 # Mini-dashboard siempre visible sobre el menú principal
 draw_mini_dashboard() {
-    # Firewall realmente activo = cadena PM_WEBBLOCK existe en iptables
+    # Firewall realmente activo = regla OUTPUT -j PM_WEBBLOCK está enganchada
     local _fw_active=false
-    iptables -L PM_WEBBLOCK -n &>/dev/null 2>&1 && _fw_active=true
+    iptables -C OUTPUT -j PM_WEBBLOCK 2>/dev/null && _fw_active=true
 
     printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
     printf '  \e[38;5;27m│\e[0m  \e[2mESTADO  DEL  FIREWALL\e[0m'
@@ -1141,6 +1191,13 @@ draw_mini_dashboard() {
 # WIZARD ACTIVAR — selección de sitios + activación en un flujo
 # =============================================================================
 wizard_activate() {
+    # Si el firewall no está activo, limpiar selección para que el wizard empiece desde cero
+    if ! iptables -C OUTPUT -j PM_WEBBLOCK 2>/dev/null; then
+        BLOCK_FACEBOOK="false"
+        BLOCK_YOUTUBE="false"
+        BLOCK_HOTMAIL="false"
+    fi
+
     while true; do
         clear
         printf '\n'
