@@ -1087,27 +1087,35 @@ toggle_var() {
 
 # Mini-dashboard siempre visible sobre el menú principal
 draw_mini_dashboard() {
+    # Firewall realmente activo = cadena PM_WEBBLOCK existe en iptables
+    local _fw_active=false
+    iptables -L PM_WEBBLOCK -n &>/dev/null 2>&1 && _fw_active=true
+
     printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
-    printf '  \e[38;5;27m│\e[0m  \e[2mESTADO  DEL  FIREWALL\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mESTADO  DEL  FIREWALL\e[0m'
+    [[ "$_fw_active" == true ]] \
+        && printf '  \e[38;5;46m● ACTIVO\e[0m\n' \
+        || printf '  \e[38;5;240m○ inactivo\e[0m\n'
 
     local _sites=("Facebook:$BLOCK_FACEBOOK:PM_FACEBOOK"
                   "YouTube:$BLOCK_YOUTUBE:PM_YOUTUBE"
                   "Hotmail:$BLOCK_HOTMAIL:PM_HOTMAIL")
     for _s in "${_sites[@]}"; do
         IFS=':' read -r _sname _sstatus _sset <<< "$_s"
-        if [[ "$_sstatus" == "true" ]]; then
+        if [[ "$_sstatus" == "true" && "$_fw_active" == true ]]; then
             local _scnt=0
             ipset list "$_sset" &>/dev/null && \
                 _scnt=$(ipset list "$_sset" 2>/dev/null \
                         | grep -cE '^[0-9]+\.' 2>/dev/null || echo 0)
-            printf "  \e[38;5;27m│\e[0m  \e[38;5;46m●\e[0m  %-10s  \e[38;5;46mBLOQUEADO\e[0m  \e[38;5;240m%-14s  %d IPs en ipset\e[0m\n" \
+            printf "  \e[38;5;27m│\e[0m  \e[38;5;46m●\e[0m  %-10s  \e[38;5;46mBLOQUEADO\e[0m  \e[38;5;240m%-14s  %d IPs\e[0m\n" \
                 "$_sname" "$_sset" "$_scnt"
+        elif [[ "$_sstatus" == "true" ]]; then
+            printf "  \e[38;5;27m│\e[0m  \e[38;5;214m◌  %-10s  seleccionado  \e[38;5;240m→ presiona 1 para activar\e[0m\n" "$_sname"
         else
             printf "  \e[38;5;27m│\e[0m  \e[38;5;240m○  %-10s  sin bloqueo\e[0m\n" "$_sname"
         fi
     done
 
-    # /etc/hosts + Firefox DoH en una línea
     printf '  \e[38;5;27m│\e[0m  '
     if grep -q "$HOSTS_MARKER_START" /etc/hosts 2>/dev/null; then
         local _hc
@@ -1115,7 +1123,7 @@ draw_mini_dashboard() {
               | grep -c "^0.0.0.0" 2>/dev/null || echo 0)
         printf '\e[38;5;46m●\e[0m  /etc/hosts %d entradas  ' "$_hc"
     else
-        printf '\e[38;5;240m○  /etc/hosts inactivo  '
+        printf '\e[38;5;240m○  /etc/hosts inactivo    '
     fi
     local _ff=false
     for _ffd in "${FIREFOX_POLICY_DIRS[@]}"; do
