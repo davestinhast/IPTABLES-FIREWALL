@@ -501,6 +501,8 @@ remove_firefox_doh_block() {
 # =============================================================================
 setup_base_chains() {
     logsec "Cadenas iptables"
+    # Asegurar módulo de string matching disponible
+    modprobe xt_string 2>/dev/null || true
     for chain in PM_REJECT PM_WEBBLOCK PM_MACBLOCK PM_CONNLIMIT; do
         iptables -F "$chain" 2>/dev/null || true
         iptables -X "$chain" 2>/dev/null || true
@@ -523,7 +525,9 @@ setup_base_chains() {
     cmd iptables -A FORWARD -j PM_WEBBLOCK
     cmd iptables -A OUTPUT  -j PM_WEBBLOCK
     cmd sysctl -w net.ipv4.ip_forward=1
-    logc "IP Forwarding activado"
+    # Matar conexiones TCP existentes para que las nuevas reglas apliquen
+    conntrack -F 2>/dev/null || true
+    logc "IP Forwarding activado — conexiones previas vaciadas"
 }
 
 # =============================================================================
@@ -1081,77 +1085,189 @@ toggle_var() {
     fi
 }
 
+# Mini-dashboard siempre visible sobre el menú principal
+draw_mini_dashboard() {
+    printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mESTADO  DEL  FIREWALL\e[0m\n'
+
+    local _sites=("Facebook:$BLOCK_FACEBOOK:PM_FACEBOOK"
+                  "YouTube:$BLOCK_YOUTUBE:PM_YOUTUBE"
+                  "Hotmail:$BLOCK_HOTMAIL:PM_HOTMAIL")
+    for _s in "${_sites[@]}"; do
+        IFS=':' read -r _sname _sstatus _sset <<< "$_s"
+        if [[ "$_sstatus" == "true" ]]; then
+            local _scnt=0
+            ipset list "$_sset" &>/dev/null && \
+                _scnt=$(ipset list "$_sset" 2>/dev/null \
+                        | grep -cE '^[0-9]+\.' 2>/dev/null || echo 0)
+            printf "  \e[38;5;27m│\e[0m  \e[38;5;46m●\e[0m  %-10s  \e[38;5;46mBLOQUEADO\e[0m  \e[38;5;240m%-14s  %d IPs en ipset\e[0m\n" \
+                "$_sname" "$_sset" "$_scnt"
+        else
+            printf "  \e[38;5;27m│\e[0m  \e[38;5;240m○  %-10s  sin bloqueo\e[0m\n" "$_sname"
+        fi
+    done
+
+    # /etc/hosts + Firefox DoH en una línea
+    printf '  \e[38;5;27m│\e[0m  '
+    if grep -q "$HOSTS_MARKER_START" /etc/hosts 2>/dev/null; then
+        local _hc
+        _hc=$(sed -n "/$HOSTS_MARKER_START/,/$HOSTS_MARKER_END/p" /etc/hosts \
+              | grep -c "^0.0.0.0" 2>/dev/null || echo 0)
+        printf '\e[38;5;46m●\e[0m  /etc/hosts %d entradas  ' "$_hc"
+    else
+        printf '\e[38;5;240m○  /etc/hosts inactivo  '
+    fi
+    local _ff=false
+    for _ffd in "${FIREFOX_POLICY_DIRS[@]}"; do
+        [[ -f "$_ffd/policies.json" ]] && _ff=true && break
+    done
+    [[ "$_ff" == true ]] \
+        && printf '·  \e[38;5;46mFirefox DoH deshabilitado\e[0m\n' \
+        || printf '·  \e[38;5;196mFirefox DoH ACTIVO\e[0m\n'
+
+    printf '  \e[38;5;27m╰──────────────────────────────────────────────────────────────╯\e[0m\n'
+    printf '\n'
+}
+
 # =============================================================================
-# SUBMENÚS
+# WIZARD ACTIVAR — selección de sitios + activación en un flujo
 # =============================================================================
-menu_sites() {
+wizard_activate() {
     while true; do
         clear
         printf '\n'
-        printf '  \e[38;5;27m╭──────────────────────────────────────╮\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[1mSitios Bloqueados\e[0m\n'
-        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
-        echo -e "  \e[38;5;27m│\e[0m  \e[1m1)\e[0m  Facebook   [$(toggle_label "$BLOCK_FACEBOOK")]"
-        echo -e "  \e[38;5;27m│\e[0m  \e[1m2)\e[0m  YouTube    [$(toggle_label "$BLOCK_YOUTUBE")]"
-        echo -e "  \e[38;5;27m│\e[0m  \e[1m3)\e[0m  Hotmail    [$(toggle_label "$BLOCK_HOTMAIL")]"
-        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Volver\n'
-        printf '  \e[38;5;27m╰──────────────────────────────────────╯\e[0m\n\n'
+        gradient_print "  ╭── ACTIVAR FIREWALL  ·  Elige qué bloquear ───────────────────╮" GRAD[@] 0
+        printf '\n'
+        printf '  \e[38;5;27m│\e[0m\n'
+
+        echo -e "  \e[38;5;27m│\e[0m  \e[38;5;51m1)\e[0m  Facebook    [$(toggle_label "$BLOCK_FACEBOOK")]"
+        printf '  \e[38;5;27m│\e[0m      \e[38;5;240mfacebook.com · messenger.com · instagram.com · fbcdn.net\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m\n'
+
+        echo -e "  \e[38;5;27m│\e[0m  \e[38;5;51m2)\e[0m  YouTube     [$(toggle_label "$BLOCK_YOUTUBE")]"
+        printf '  \e[38;5;27m│\e[0m      \e[38;5;240myoutube.com · googlevideo.com · ytimg.com · youtu.be\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m\n'
+
+        echo -e "  \e[38;5;27m│\e[0m  \e[38;5;51m3)\e[0m  Hotmail     [$(toggle_label "$BLOCK_HOTMAIL")]"
+        printf '  \e[38;5;27m│\e[0m      \e[38;5;240moutlook.com · hotmail.com · microsoftonline.com · live.com\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m\n'
+
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;46mA)\e[0m  \e[1mActivar con selección actual\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Cancelar\n'
+        printf '  \e[38;5;27m│\e[0m\n'
+        gradient_print "  ╰──────────────────────────────────────────────────────────────╯" GRAD[@] 4
+        printf '\n\n'
+
         read -rp "  Opción: " opt
         case "$opt" in
             1) toggle_var BLOCK_FACEBOOK; save_config ;;
             2) toggle_var BLOCK_YOUTUBE;  save_config ;;
             3) toggle_var BLOCK_HOTMAIL;  save_config ;;
-            0) break ;;
+            [Aa])
+                local _any=false
+                [[ "$BLOCK_FACEBOOK" == "true" || \
+                   "$BLOCK_YOUTUBE"  == "true" || \
+                   "$BLOCK_HOTMAIL"  == "true" ]] && _any=true
+                if [[ "$_any" == false ]]; then
+                    printf '\n  \e[33m[!]\e[0m  Selecciona al menos un sitio primero.\n'
+                    sleep 1.2
+                else
+                    enable_firewall
+                    return
+                fi
+                ;;
+            0) return ;;
         esac
     done
 }
 
+# =============================================================================
+# SUBMENÚS REDISEÑADOS
+# =============================================================================
 menu_interfaces() {
-    printf '\n  \e[1mInterfaces disponibles:\e[0m\n'
-    ip -o link show | awk -F': ' '{print "    " $2}' | grep -v "^    lo"
-    printf '\n  WAN actual: \e[38;5;51m%s\e[0m\n' "${WAN_IFACE:-no configurada}"
-    printf '  LAN actual: \e[38;5;51m%s\e[0m\n\n' "${LAN_IFACE:-no configurada}"
-    read -rp "  WAN [Enter para mantener]: " w
-    read -rp "  LAN [Enter para mantener]: " l
+    clear
+    printf '\n'
+    printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[1mInterfaces de Red  (WAN / LAN)\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mWAN = tarjeta conectada a internet\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mLAN = tarjeta conectada a la red local de clientes\e[0m\n'
+    printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mInterfaces detectadas en este sistema:\e[0m\n'
+    ip -o link show 2>/dev/null \
+        | awk -F': ' '{printf "  \033[38;5;27m│\033[0m     \033[38;5;51m%-14s\033[0m\n", $2}' \
+        | grep -v "lo$"
+    printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+    printf "  \e[38;5;27m│\e[0m  WAN actual:  \e[38;5;46m%s\e[0m\n" "${WAN_IFACE:-no configurada}"
+    printf "  \e[38;5;27m│\e[0m  LAN actual:  \e[38;5;46m%s\e[0m\n" "${LAN_IFACE:-no configurada}"
+    printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
+    read -rp "  Nueva WAN (Enter = mantener '${WAN_IFACE:-vacío}'): " w
+    read -rp "  Nueva LAN (Enter = mantener '${LAN_IFACE:-vacío}'): " l
     [[ -n "$w" ]] && WAN_IFACE="$w"
     [[ -n "$l" ]] && LAN_IFACE="$l"
     save_config
-    printf '  \e[38;5;46m✓ Guardado.\e[0m\n'
+    printf '\n  \e[38;5;46m✓ Guardado  →  WAN: %s  |  LAN: %s\e[0m\n' \
+        "${WAN_IFACE:-—}" "${LAN_IFACE:-—}"
 }
 
 menu_mac() {
     while true; do
-        printf '\n  \e[1mBloqueo por MAC\e[0m\n'
+        clear
+        printf '\n'
+        printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mBloqueo por Dirección MAC\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mLos equipos con estas MACs no pueden enviar paquetes\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2ma través de este servidor (cadena FORWARD).\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+
         if [[ -n "$MAC_BLOCKS_STR" ]]; then
-            printf '  MACs bloqueadas:\n'
             IFS=',' read -ra _macs <<< "$MAC_BLOCKS_STR"
             local i=1
             for mac in "${_macs[@]}"; do
-                [[ -n "$mac" ]] && printf '    \e[38;5;46m%d) %s\e[0m\n' $i "$mac" && ((i++))
+                [[ -z "$mac" ]] && continue
+                printf "  \e[38;5;27m│\e[0m  \e[38;5;196m✗\e[0m  \e[38;5;51m%s\e[0m\n" "$mac"
+                printf "  \e[38;5;27m│\e[0m      \e[38;5;240m→ iptables FORWARD -m mac --mac-source %s -j REJECT\e[0m\n" "$mac"
+                ((i++))
             done
         else
-            printf '  \e[2mSin MACs configuradas.\e[0m\n'
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;240m  Sin MACs configuradas. Agrega una con [a].\e[0m\n'
         fi
-        printf '\n  a) Agregar  d) Eliminar  0) Volver\n\n'
+
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;46ma)\e[0m  Agregar MAC   \e[38;5;196md)\e[0m  Eliminar MAC   \e[38;5;240m0)\e[0m  Volver\n'
+        printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
+
         read -rp "  Opción: " opt
         case "$opt" in
-            a)
-                read -rp "  MAC (AA:BB:CC:DD:EE:FF): " mac
+            a|A)
+                printf '\n  \e[1mAgregar dirección MAC al bloqueo\e[0m\n\n'
+                printf '  \e[2mFormato requerido:\e[0m  \e[38;5;51mAA:BB:CC:DD:EE:FF\e[0m\n'
+                printf '  \e[2mEjemplo:\e[0m           \e[38;5;51m00:1A:2B:3C:4D:5E\e[0m\n\n'
+                printf '  \e[2mPara obtener la MAC de un equipo cliente:\e[0m\n'
+                printf '  \e[38;5;240m  ip neigh show   (tabla ARP de esta máquina)\e[0m\n'
+                printf '  \e[38;5;240m  arp -a          (alternativa)\e[0m\n\n'
+                read -rp "  MAC address: " mac
                 if [[ "$mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
                     MAC_BLOCKS_STR="${MAC_BLOCKS_STR:+${MAC_BLOCKS_STR},}${mac}"
                     save_config
-                    printf '  \e[38;5;46m✓ MAC agregada.\e[0m\n'
+                    printf '\n  \e[38;5;46m✓ Guardada. Se aplicará al activar el firewall.\e[0m\n'
+                    sleep 1.2
                 else
-                    printf '  \e[31mFormato inválido.\e[0m\n'
+                    printf '\n  \e[31m✗ Formato inválido. Debe ser: XX:XX:XX:XX:XX:XX\e[0m\n'
+                    sleep 1.5
                 fi
                 ;;
-            d)
+            d|D)
+                if [[ -z "$MAC_BLOCKS_STR" ]]; then
+                    printf '\n  \e[33mNo hay MACs para eliminar.\e[0m\n'; sleep 1; continue
+                fi
+                printf '\n  Copia la MAC exactamente como aparece arriba:\n\n'
                 read -rp "  MAC a eliminar: " mac
-                MAC_BLOCKS_STR=$(
-                    tr ',' '\n' <<< "$MAC_BLOCKS_STR" \
+                MAC_BLOCKS_STR=$(tr ',' '\n' <<< "$MAC_BLOCKS_STR" \
                     | grep -vi "^${mac}$" | tr '\n' ',' | sed 's/,$//')
-                save_config; printf '  \e[38;5;46m✓ Eliminada.\e[0m\n' ;;
+                save_config; printf '  \e[38;5;46m✓ Eliminada.\e[0m\n'; sleep 0.8
+                ;;
             0) break ;;
         esac
     done
@@ -1159,40 +1275,70 @@ menu_mac() {
 
 menu_connlimit() {
     while true; do
-        printf '\n  \e[1mLímites de Conexión\e[0m\n'
+        clear
+        printf '\n'
+        printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mLímite de Conexiones Simultáneas\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mCada IP cliente no puede tener más de N conexiones abiertas\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mal mismo tiempo hacia un puerto específico.\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+
         if [[ -n "$CONN_LIMITS_STR" ]]; then
             IFS=',' read -ra _limits <<< "$CONN_LIMITS_STR"
-            local i=1
             for entry in "${_limits[@]}"; do
                 [[ -z "$entry" ]] && continue
                 IFS=':' read -r _p _port _max <<< "$entry"
-                printf '  \e[38;5;46m%d) %s/%s  max=%s conexiones\e[0m\n' \
-                    $i "$_p" "$_port" "$_max"
-                ((i++))
+                printf "  \e[38;5;27m│\e[0m  \e[38;5;214m●\e[0m  \e[38;5;51m%-4s\e[0m  puerto \e[38;5;51m%-6s\e[0m  máx \e[1m%s\e[0m conexiones por IP\n" \
+                    "$_p" "$_port" "$_max"
+                printf "  \e[38;5;27m│\e[0m      \e[38;5;240m→ --connlimit-above %s --connlimit-mask 32 -j REJECT\e[0m\n" "$_max"
             done
         else
-            printf '  \e[2mSin límites.\e[0m\n'
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;240m  Sin límites configurados. Agrega uno con [a].\e[0m\n'
         fi
-        printf '\n  a) Agregar  d) Eliminar  0) Volver\n\n'
+
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;46ma)\e[0m  Agregar   \e[38;5;196md)\e[0m  Eliminar   \e[38;5;240m0)\e[0m  Volver\n'
+        printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
+
         read -rp "  Opción: " opt
         case "$opt" in
-            a)
-                read -rp "  Protocolo (tcp/udp): " proto
+            a|A)
+                printf '\n  \e[1mAgregar límite de conexiones\e[0m\n\n'
+                printf '  \e[38;5;27m──\e[0m  \e[1mPaso 1 de 3\e[0m  Protocolo\n'
+                printf '  \e[38;5;240m     tcp = HTTP, HTTPS, SSH\e[0m\n'
+                printf '  \e[38;5;240m     udp = DNS, streaming, juegos\e[0m\n'
+                read -rp "  Protocolo [tcp/udp]: " proto
+
+                printf '\n  \e[38;5;27m──\e[0m  \e[1mPaso 2 de 3\e[0m  Puerto de destino\n'
+                printf '  \e[38;5;240m     Comunes: 80 (HTTP)  443 (HTTPS)  22 (SSH)\e[0m\n'
                 read -rp "  Puerto: " port
-                read -rp "  Máx conexiones: " max
+
+                printf '\n  \e[38;5;27m──\e[0m  \e[1mPaso 3 de 3\e[0m  Máximo de conexiones simultáneas\n'
+                printf '  \e[38;5;240m     Sugerido: 50 para HTTP/HTTPS · 10 para SSH\e[0m\n'
+                read -rp "  Máximo: " max
+
                 if [[ "$proto" =~ ^(tcp|udp)$ && "$port" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ ]]; then
                     CONN_LIMITS_STR="${CONN_LIMITS_STR:+${CONN_LIMITS_STR},}${proto}:${port}:${max}"
-                    save_config; printf '  \e[38;5;46m✓ Agregado.\e[0m\n'
+                    save_config
+                    printf '\n  \e[38;5;46m✓ Límite guardado:\e[0m  %s puerto %s  máx %s conexiones\n' \
+                        "$proto" "$port" "$max"
+                    sleep 1.5
                 else
-                    printf '  \e[31mDatos inválidos.\e[0m\n'
+                    printf '\n  \e[31m✗ Datos inválidos.\e[0m  Protocolo: tcp o udp · Puerto y máximo: solo números.\n'
+                    sleep 2
                 fi
                 ;;
-            d)
-                read -rp "  Entrada (proto:puerto:max): " entry
-                CONN_LIMITS_STR=$(
-                    tr ',' '\n' <<< "$CONN_LIMITS_STR" \
+            d|D)
+                if [[ -z "$CONN_LIMITS_STR" ]]; then
+                    printf '\n  \e[33mNo hay límites para eliminar.\e[0m\n'; sleep 1; continue
+                fi
+                printf '\n  Ingresa la entrada a eliminar (proto:puerto:max):\n'
+                printf '  \e[38;5;240m  Ejemplo: tcp:443:50\e[0m\n\n'
+                read -rp "  Entrada: " entry
+                CONN_LIMITS_STR=$(tr ',' '\n' <<< "$CONN_LIMITS_STR" \
                     | grep -v "^${entry}$" | tr '\n' ',' | sed 's/,$//')
-                save_config; printf '  \e[38;5;46m✓ Eliminado.\e[0m\n' ;;
+                save_config; printf '  \e[38;5;46m✓ Eliminado.\e[0m\n'; sleep 0.8
+                ;;
             0) break ;;
         esac
     done
@@ -1204,14 +1350,12 @@ menu_connlimit() {
 main_menu() {
     if [[ "$FIRST_DRAW" == true ]]; then
         clear
-        # Boot spinner mientras carga
         boot_spinner &
         local _bpid=$!
         load_config
         sleep 0.6
         kill "$_bpid" 2>/dev/null; wait "$_bpid" 2>/dev/null
         printf '\r%*s\r' "$(tput cols)" ""
-
         draw_banner_animated
         FIRST_DRAW=false
     fi
@@ -1219,40 +1363,35 @@ main_menu() {
     while true; do
         clear
         draw_banner_static
+        draw_mini_dashboard
 
-        # Estado — evaluado correctamente con double quotes
-        echo -e "  \e[2mFB:\e[0m $(toggle_label "$BLOCK_FACEBOOK")   \e[2mYT:\e[0m $(toggle_label "$BLOCK_YOUTUBE")   \e[2mHM:\e[0m $(toggle_label "$BLOCK_HOTMAIL")"
-        printf '\n'
-
-        printf '  \e[38;5;27m╭──────────────────────────────────────╮\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;51m1)\e[0m  \e[1mActivar firewall\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;51m2)\e[0m  Desactivar firewall\n'
-        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m3)\e[0m  Configurar sitios bloqueados\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m4)\e[0m  Configurar interfaces (WAN/LAN)\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m5)\e[0m  Bloqueo por MAC\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m6)\e[0m  Limites de conexion\n'
-        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m7)\e[0m  Dashboard en vivo\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m8)\e[0m  Ver logs\n'
-        printf '  \e[38;5;27m├──────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m9)\e[0m  Reset total de red\n'
+        printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;46m1)\e[0m  \e[1mActivar Firewall\e[0m  \e[2m— elegir sitios y aplicar reglas\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m2)\e[0m  Desactivar Firewall  \e[2m— eliminar todas las reglas activas\e[0m\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m3)\e[0m  Bloqueo por MAC address  \e[2m— denegar equipos por hardware\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m4)\e[0m  Límite de conexiones  \e[2m— máx simultáneas por IP\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m5)\e[0m  Interfaces WAN / LAN  \e[2m— configurar tarjetas de red\e[0m\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m6)\e[0m  Dashboard en vivo  \e[2m— monitoreo en tiempo real [q] salir\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m7)\e[0m  Registro de paquetes  \e[2m— logs PM-DROP del kernel\e[0m\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m8)\e[0m  Reset total de red  \e[2m— eliminar todo, restaurar internet\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Salir\n'
-        printf '  \e[38;5;27m╰──────────────────────────────────────╯\e[0m\n'
+        printf '  \e[38;5;27m╰──────────────────────────────────────────────────────────────╯\e[0m\n'
         printf '\n'
 
         read -rp "  Opción: " choice
 
         case "$choice" in
-            1) enable_firewall;  read -rp $'\n  Presiona Enter...' ;;
-            2) disable_firewall; read -rp $'\n  Presiona Enter...' ;;
-            3) menu_sites ;;
-            4) menu_interfaces; read -rp $'\n  Presiona Enter...' ;;
-            5) menu_mac ;;
-            6) menu_connlimit ;;
-            7) show_dashboard ;;
-            8) show_logs;    read -rp $'\n  Presiona Enter...' ;;
-            9) deep_reset;   read -rp $'\n  Presiona Enter...' ;;
+            1) wizard_activate;  read -rp $'\n  Presiona Enter para volver al menú...' ;;
+            2) disable_firewall; read -rp $'\n  Presiona Enter para volver al menú...' ;;
+            3) menu_mac ;;
+            4) menu_connlimit ;;
+            5) menu_interfaces; read -rp $'\n  Presiona Enter...' ;;
+            6) show_dashboard ;;
+            7) show_logs;    read -rp $'\n  Presiona Enter...' ;;
+            8) deep_reset;   read -rp $'\n  Presiona Enter...' ;;
             0) printf '\n'; gradient_print "  Hasta luego." GRAD[@] 0; printf '\n\n'; exit 0 ;;
             *) printf '  \e[31mOpción inválida.\e[0m\n'; sleep 0.8 ;;
         esac
