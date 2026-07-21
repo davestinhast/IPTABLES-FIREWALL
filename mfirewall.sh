@@ -603,7 +603,11 @@ apply_sni_rules() {
             cmd iptables -A PM_WEBBLOCK -p tcp --dport 80 \
                 -m string --string "$domain" --algo bm -j PM_REJECT
         done
-        logc "YouTube SNI: ${#sni_yt[@]} dominios"
+        # Bloqueo global QUIC/HTTP3 — YouTube lo usa agresivamente y no tiene SNI visible.
+        # Si Firefox tiene la IP cacheada y QUIC no está bloqueado, bypasea todo lo demás.
+        # Sitios que no son YouTube seguirán usando TCP normalmente.
+        cmd iptables -A PM_WEBBLOCK -p udp --dport 443 -j PM_REJECT
+        logc "YouTube SNI: ${#sni_yt[@]} dominios + QUIC (UDP 443) bloqueado globalmente"
     fi
     if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
         for domain in "${sni_hm[@]}"; do
@@ -954,10 +958,47 @@ setup_dns_proxy() {
     cmd iptables -t nat -I OUTPUT 3 -p tcp --dport 53 -d "$_up" -j RETURN
     cmd iptables -t nat -I OUTPUT 4 -p tcp --dport 53 -j REDIRECT --to-ports "$DNS_PROXY_PORT"
 
-    # Matar Firefox — CRÍTICO para vaciar su caché DNS interno
-    # Sin esto, Firefox sigue usando IPs cacheadas aunque bloqueemos DNS
-    pkill -f "firefox" 2>/dev/null || true
-    sleep 0.3
+    # ── Limpiar caché de Firefox ────────────────────────────────────────────────
+    # Firefox cachea IPs en memoria del proceso Y guarda páginas en disco.
+    # SIGKILL (-9) asegura muerte inmediata de todos los procesos child
+    # (socket process, content process, GPU process — cada uno en su propio PID).
+    pkill -9 -f "firefox" 2>/dev/null || true
+    # Esperar muerte real — SIGTERM es ignorable, SIGKILL no, pero tarda un tick
+    local _ff_tries=0
+    while (( _ff_tries++ < 15 )) && pgrep -f "firefox" >/dev/null 2>&1; do
+        kill -9 $(pgrep -f "firefox" 2>/dev/null) 2>/dev/null || true
+        sleep 0.3
+    done
+
+    # Limpiar HTTP cache en disco — Firefox carga YouTube desde cache2
+    # aunque el DNS devuelva NXDOMAIN, porque tiene el HTML/JS cacheado
+    local _cache_dir
+    for _cache_dir in /root/.cache/mozilla/firefox /home/*/.cache/mozilla/firefox; do
+        [[ -d "$_cache_dir" ]] || continue
+        find "$_cache_dir" -maxdepth 3 -type d -name "cache2" \
+            -exec rm -rf {} \; 2>/dev/null || true
+    done
+
+    # Limpiar sessionstore — evita que Firefox reabra pestaña de YouTube al reiniciar
+    local _prof
+    for _prof in /root/.mozilla/firefox/*.default* \
+                 /root/.mozilla/firefox/*.default-esr* \
+                 /home/*/.mozilla/firefox/*.default* \
+                 /home/*/.mozilla/firefox/*.default-esr*; do
+        [[ -d "$_prof" ]] || continue
+        rm -f  "$_prof/sessionstore.jsonlz4"   2>/dev/null || true
+        rm -rf "$_prof/sessionstore-backups"    2>/dev/null || true
+    done
+
+    # Verificar que el proxy responde correctamente
+    sleep 0.5
+    local _test_resp
+    _test_resp=$(dig +short +time=2 youtube.com @127.0.0.1 -p "$DNS_PROXY_PORT" 2>/dev/null || true)
+    if [[ -z "$_test_resp" ]]; then
+        logc "DNS proxy verificado: youtube.com → NXDOMAIN ✓"
+    else
+        logc "AVISO: youtube.com resolvió a '$_test_resp' — revisar proxy"
+    fi
 
     logc "DNS proxy PID=$_pid · upstream=$_up · bloqueando: ${_kws[*]}"
 }
