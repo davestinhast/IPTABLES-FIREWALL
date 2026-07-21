@@ -527,6 +527,46 @@ setup_base_chains() {
 }
 
 # =============================================================================
+# SNI BLOCKING — coincide con nombre de dominio en TLS ClientHello (texto plano)
+# Funciona aunque las IPs de YouTube roten en Anycast de Google
+# =============================================================================
+apply_sni_rules() {
+    logsec "SNI string-match blocking"
+    local sni_fb=("facebook.com" "fbcdn.net" "fbsbx.com" "messenger.com")
+    local sni_yt=("youtube.com" "googlevideo.com" "ytimg.com" "youtu.be" "youtube-nocookie.com")
+    local sni_hm=("hotmail.com" "outlook.com" "microsoftonline.com" "live.com")
+
+    local domain
+    if [[ "$BLOCK_FACEBOOK" == "true" ]]; then
+        for domain in "${sni_fb[@]}"; do
+            cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
+                -m string --string "$domain" --algo bm -j PM_REJECT
+            cmd iptables -A PM_WEBBLOCK -p tcp --dport 80 \
+                -m string --string "$domain" --algo bm -j PM_REJECT
+        done
+        logc "Facebook SNI: ${#sni_fb[@]} dominios"
+    fi
+    if [[ "$BLOCK_YOUTUBE" == "true" ]]; then
+        for domain in "${sni_yt[@]}"; do
+            cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
+                -m string --string "$domain" --algo bm -j PM_REJECT
+            cmd iptables -A PM_WEBBLOCK -p tcp --dport 80 \
+                -m string --string "$domain" --algo bm -j PM_REJECT
+        done
+        logc "YouTube SNI: ${#sni_yt[@]} dominios"
+    fi
+    if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
+        for domain in "${sni_hm[@]}"; do
+            cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
+                -m string --string "$domain" --algo bm -j PM_REJECT
+            cmd iptables -A PM_WEBBLOCK -p tcp --dport 80 \
+                -m string --string "$domain" --algo bm -j PM_REJECT
+        done
+        logc "Hotmail SNI: ${#sni_hm[@]} dominios"
+    fi
+}
+
+# =============================================================================
 # BLOQUEADOR ANIMADO — targeting de IPs en tiempo real
 # =============================================================================
 
@@ -768,7 +808,7 @@ enable_firewall() {
     printf '\n\n'
 
     # Calcular total de pasos
-    local total=4  # base + hosts + firefox + dns
+    local total=5  # base + SNI + hosts + firefox + dns
     [[ "$BLOCK_FACEBOOK" == "true" ]] && (( total++ ))
     [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && (( total++ ))
@@ -806,6 +846,9 @@ enable_firewall() {
         (( step++ )); run_step $step $total "Aplicando límites de conexión" apply_conn_limits
         draw_progress_bar $step $total
     fi
+
+    (( step++ )); run_step $step $total "Aplicando bloqueo SNI (TLS)" apply_sni_rules
+    draw_progress_bar $step $total
 
     (( step++ )); run_step $step $total "Inyectando /etc/hosts" apply_all_hosts
     draw_progress_bar $step $total
