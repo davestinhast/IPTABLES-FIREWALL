@@ -835,7 +835,10 @@ apply_conn_limits() {
 
 flush_dns() {
     logsec "DNS Cache Flush"
-    cmd systemctl restart systemd-resolved 2>/dev/null || true
+    # Si el proxy está activo, no reiniciar systemd-resolved (lo reemplazamos)
+    if [[ ! -f "$DNS_PROXY_PID_FILE" ]]; then
+        cmd systemctl restart systemd-resolved 2>/dev/null || true
+    fi
     cmd resolvectl flush-caches 2>/dev/null || true
     logc "Caché DNS limpiada"
 }
@@ -912,9 +915,9 @@ PYEOF
 }
 
 setup_dns_proxy() {
-    logsec "DNS proxy Python3 (intercepta port 53 antes del browser)"
+    logsec "DNS proxy en port 53 (reemplaza systemd-resolved)"
 
-    # Detectar upstream DNS real — evitar loopbacks (127.x.x.x)
+    # ── 1. Upstream DNS real ANTES de parar systemd-resolved ────────────────────
     local _up
     _up=$(awk '/^nameserver/ && $2 !~ /^127\./{print $2; exit}' \
           /run/systemd/resolve/resolv.conf 2>/dev/null)
@@ -923,55 +926,69 @@ setup_dns_proxy() {
               /etc/resolv.conf 2>/dev/null)
     [[ -z "$_up" ]] && _up="8.8.8.8"
 
-    # Construir lista de keywords a bloquear (CSV para pasarle a Python)
+    # ── 2. Parar systemd-resolved → libera port 53 ──────────────────────────────
+    # Sin esto, Python no puede bindear port 53 (ya ocupado)
+    cmd systemctl stop systemd-resolved 2>/dev/null || true
+    pkill -f "systemd-resolved" 2>/dev/null || true
+    sleep 0.5
+
+    # ── 3. Reemplazar /etc/resolv.conf para que todo DNS vaya a nuestro proxy ───
+    # Si es symlink (Kali con systemd-resolved usa stub-resolv.conf), guardamos target
+    if [[ -L /etc/resolv.conf ]]; then
+        readlink /etc/resolv.conf > /var/run/mfirewall-resolv-symlink 2>/dev/null || true
+        rm -f /etc/resolv.conf
+    else
+        cp /etc/resolv.conf /etc/resolv.conf.mfirewall_bak 2>/dev/null || true
+    fi
+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+
+    # ── 4. Keywords a bloquear ──────────────────────────────────────────────────
     local -a _kws=()
     [[ "$BLOCK_YOUTUBE"  == "true" ]] && \
         _kws+=(youtube googlevideo ytimg youtu youtube-nocookie youtubei)
     [[ "$BLOCK_FACEBOOK" == "true" ]] && \
-        _kws+=(facebook fbcdn messenger instagram fbsbx fb.com)
+        _kws+=(facebook fbcdn messenger instagram fbsbx)
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && \
         _kws+=(hotmail outlook microsoftonline live.com office365)
-    # Bloquear DoH providers siempre — evita que Firefox bypasee con HTTPS DNS
-    _kws+=(dns.google cloudflare-dns dns.quad9 use-application-dns)
+    # Bloquear DoH providers — Firefox intenta usar Cloudflare/Google DNS-over-HTTPS
+    _kws+=(dns.google cloudflare-dns dns.quad9 use-application-dns mozilla.cloudflare)
     local _csv
     _csv=$(IFS=','; echo "${_kws[*]}")
 
-    # Matar instancia previa si existe
+    # ── 5. Kill instancia previa ─────────────────────────────────────────────────
     if [[ -f "$DNS_PROXY_PID_FILE" ]]; then
         kill "$(cat "$DNS_PROXY_PID_FILE")" 2>/dev/null || true
         rm -f "$DNS_PROXY_PID_FILE"
     fi
 
-    # Escribir y arrancar el proxy en background (cmd() no soporta &)
+    # ── 6. Proxy en port 53 directo — sin REDIRECT, sin loops ───────────────────
     _write_dns_proxy_script
-    [[ -n "$CMD_LOG" ]] && printf '[%s] [CMD] python3 %s %s %s %s &\n' \
-        "$(date +%H:%M:%S)" "$DNS_PROXY_SCRIPT" "$_up" "$DNS_PROXY_PORT" "$_csv" >> "$CMD_LOG"
-    python3 "$DNS_PROXY_SCRIPT" "$_up" "$DNS_PROXY_PORT" "$_csv" &
+    [[ -n "$CMD_LOG" ]] && printf '[%s] [CMD] python3 %s %s 53 %s &\n' \
+        "$(date +%H:%M:%S)" "$DNS_PROXY_SCRIPT" "$_up" "$_csv" >> "$CMD_LOG"
+    python3 "$DNS_PROXY_SCRIPT" "$_up" 53 "$_csv" &
     local _pid=$!
-    disown "$_pid"  # evita que bash lo mate al volver al menú
+    disown "$_pid"
     echo "$_pid" > "$DNS_PROXY_PID_FILE"
-    sleep 0.5
+    sleep 0.8  # esperar que Python bindee el socket
 
-    # REDIRECT toda consulta DNS (excepto al upstream real para evitar bucle)
-    cmd iptables -t nat -I OUTPUT 1 -p udp --dport 53 -d "$_up" -j RETURN
-    cmd iptables -t nat -I OUTPUT 2 -p udp --dport 53 -j REDIRECT --to-ports "$DNS_PROXY_PORT"
-    cmd iptables -t nat -I OUTPUT 3 -p tcp --dport 53 -d "$_up" -j RETURN
-    cmd iptables -t nat -I OUTPUT 4 -p tcp --dport 53 -j REDIRECT --to-ports "$DNS_PROXY_PORT"
+    # ── 7. Bloquear IPs de servidores DoH — Firefox los tiene hardcodeados ──────
+    # Sin esto Firefox hace DoH a Cloudflare (1.1.1.1) sin pasar por nuestro proxy
+    for _doh in 1.1.1.1 1.0.0.1 104.16.248.249 104.16.249.249 \
+                8.8.8.8 8.8.4.4 9.9.9.9 9.9.9.10; do
+        cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 -d "$_doh" -j PM_REJECT
+        cmd iptables -A PM_WEBBLOCK -p udp --dport 443 -d "$_doh" -j PM_REJECT
+    done
 
-    # ── Limpiar caché de Firefox ────────────────────────────────────────────────
-    # Firefox cachea IPs en memoria del proceso Y guarda páginas en disco.
-    # SIGKILL (-9) asegura muerte inmediata de todos los procesos child
-    # (socket process, content process, GPU process — cada uno en su propio PID).
+    # ── 8. Matar Firefox + limpiar TODO el caché ─────────────────────────────────
     pkill -9 -f "firefox" 2>/dev/null || true
-    # Esperar muerte real — SIGTERM es ignorable, SIGKILL no, pero tarda un tick
     local _ff_tries=0
-    while (( _ff_tries++ < 15 )) && pgrep -f "firefox" >/dev/null 2>&1; do
+    while (( _ff_tries++ < 20 )) && pgrep -f "firefox" >/dev/null 2>&1; do
         kill -9 $(pgrep -f "firefox" 2>/dev/null) 2>/dev/null || true
         sleep 0.3
     done
 
-    # Limpiar HTTP cache en disco — Firefox carga YouTube desde cache2
-    # aunque el DNS devuelva NXDOMAIN, porque tiene el HTML/JS cacheado
+    # HTTP cache en disco (Firefox carga YouTube aunque DNS devuelva NXDOMAIN
+    # si tiene el HTML/JS guardado en cache2/)
     local _cache_dir
     for _cache_dir in /root/.cache/mozilla/firefox /home/*/.cache/mozilla/firefox; do
         [[ -d "$_cache_dir" ]] || continue
@@ -979,42 +996,58 @@ setup_dns_proxy() {
             -exec rm -rf {} \; 2>/dev/null || true
     done
 
-    # Limpiar sessionstore — evita que Firefox reabra pestaña de YouTube al reiniciar
+    # Sessionstore — evita que Firefox reabra pestaña de YouTube
     local _prof
     for _prof in /root/.mozilla/firefox/*.default* \
                  /root/.mozilla/firefox/*.default-esr* \
                  /home/*/.mozilla/firefox/*.default* \
                  /home/*/.mozilla/firefox/*.default-esr*; do
         [[ -d "$_prof" ]] || continue
-        rm -f  "$_prof/sessionstore.jsonlz4"   2>/dev/null || true
-        rm -rf "$_prof/sessionstore-backups"    2>/dev/null || true
+        rm -f  "$_prof/sessionstore.jsonlz4"  2>/dev/null || true
+        rm -rf "$_prof/sessionstore-backups"   2>/dev/null || true
     done
 
-    # Verificar que el proxy responde correctamente
+    # ── 9. Verificar ─────────────────────────────────────────────────────────────
     sleep 0.5
-    local _test_resp
-    _test_resp=$(dig +short +time=2 youtube.com @127.0.0.1 -p "$DNS_PROXY_PORT" 2>/dev/null || true)
-    if [[ -z "$_test_resp" ]]; then
-        logc "DNS proxy verificado: youtube.com → NXDOMAIN ✓"
+    local _test
+    _test=$(dig +short +time=2 youtube.com 2>/dev/null | head -1 || true)
+    if [[ -z "$_test" ]]; then
+        logc "✓ DNS proxy OK: youtube.com → NXDOMAIN (upstream: $_up)"
     else
-        logc "AVISO: youtube.com resolvió a '$_test_resp' — revisar proxy"
+        logc "AVISO: youtube.com resolvió a '$_test' — proxy no interceptó"
     fi
 
-    logc "DNS proxy PID=$_pid · upstream=$_up · bloqueando: ${_kws[*]}"
+    logc "DNS proxy PID=$_pid · port=53 · upstream=$_up"
 }
 
 teardown_dns_proxy() {
-    logsec "Deteniendo DNS proxy"
+    logsec "Deteniendo DNS proxy y restaurando DNS"
+
+    # Matar proxy
     if [[ -f "$DNS_PROXY_PID_FILE" ]]; then
         local _pid
         _pid=$(cat "$DNS_PROXY_PID_FILE")
         cmd kill "$_pid" 2>/dev/null || true
         rm -f "$DNS_PROXY_PID_FILE"
     fi
-    # Matar cualquier instancia huérfana del script
     pkill -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
     rm -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
-    logc "DNS proxy detenido"
+
+    # Restaurar /etc/resolv.conf
+    rm -f /etc/resolv.conf 2>/dev/null || true
+    if [[ -f /var/run/mfirewall-resolv-symlink ]]; then
+        local _tgt
+        _tgt=$(cat /var/run/mfirewall-resolv-symlink)
+        ln -sf "$_tgt" /etc/resolv.conf 2>/dev/null || true
+        rm -f /var/run/mfirewall-resolv-symlink
+    elif [[ -f /etc/resolv.conf.mfirewall_bak ]]; then
+        mv /etc/resolv.conf.mfirewall_bak /etc/resolv.conf
+    fi
+
+    # Reiniciar systemd-resolved
+    cmd systemctl start systemd-resolved 2>/dev/null || true
+
+    logc "DNS proxy detenido, DNS restaurado"
 }
 
 # =============================================================================
