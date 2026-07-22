@@ -452,6 +452,20 @@ apply_all_hosts() {
             printf '0.0.0.0 %s\n' "$d"   # bloqueo IPv4
             printf ':: %s\n'     "$d"    # bloqueo IPv6 — evita bypass por AAAA records
         done
+        # Servidores DoH — bloqueados siempre que el firewall esté activo
+        # Firefox puede usar DoH como bypass si estos nombres resuelven
+        for _doh in \
+            dns.google dns64.dns.google \
+            cloudflare-dns.com mozilla.cloudflare-dns.com \
+            1dot1dot1dot1.cloudflare-dns.com dns.cloudflare.com \
+            doh.opendns.com doh.dns.apple.com \
+            dns.quad9.net dns10.quad9.net \
+            doh.cleanbrowsing.org \
+            dns.adguard.com \
+            doh.nextdns.io; do
+            printf '0.0.0.0 %s\n' "$_doh"
+            printf ':: %s\n'     "$_doh"
+        done
         printf '%s\n' "$HOSTS_MARKER_END"
     } >> /etc/hosts
     if [[ -n "$CMD_LOG" ]]; then
@@ -469,7 +483,14 @@ apply_all_hosts() {
 # =============================================================================
 FIREFOX_POLICY='{
   "policies": {
-    "DNSOverHTTPS": { "Enabled": false, "Locked": true }
+    "DNSOverHTTPS": { "Enabled": false, "Locked": true },
+    "Preferences": {
+      "network.trr.mode":                      { "Value": 5,    "Status": "locked" },
+      "network.trr.uri":                       { "Value": "",   "Status": "locked" },
+      "network.trr.bootstrapAddress":          { "Value": "",   "Status": "locked" },
+      "network.dns.disablePrefetch":           { "Value": true, "Status": "locked" },
+      "network.dns.disablePrefetchFromHTTPS":  { "Value": true, "Status": "locked" }
+    }
   }
 }'
 
@@ -595,6 +616,79 @@ apply_dns_block() {
             -m string --hex-string "$_hex" --algo bm -j PM_REJECT
     done
     logc "DNS blocking: ${#_dns_rules[@]} patrones en port 53"
+}
+
+# =============================================================================
+# GOOGLE/YOUTUBE IP RANGE BLOCKING — iptables con CIDR directo (-d)
+# Fuente: https://www.gstatic.com/ipranges/goog.json (Google publica sus propios rangos)
+# iptables acepta CIDR en -d nativamente: -d 74.125.0.0/16 -j PM_REJECT
+# Garantía extra: aunque Firefox bypasee DNS (DoH, cache), el paquete TCP/UDP
+# llega a iptables y es rechazado ANTES de que el servidor responda.
+# =============================================================================
+apply_goog_ranges_iptables() {
+    logsec "Bloqueando rangos IP Google/YouTube con iptables (CIDR directo)"
+
+    # Rangos IPv4 de Google/YouTube CDN (goog.json publicado por Google en gstatic.com)
+    # EXCLUIDOS: 8.8.4.0/24 y 8.8.8.0/24 — son los DNS resolvers públicos de Google,
+    # bloquearlos completamente rompería la resolución DNS del sistema.
+    # El proxy DNS ya maneja ese caso por separado.
+    local _ranges=(
+        8.34.208.0/20     8.35.192.0/20
+        23.236.48.0/20    23.251.128.0/19
+        34.0.0.0/15       34.2.0.0/16
+        34.3.0.0/23       34.3.3.0/24
+        34.4.0.0/14       34.8.0.0/13
+        34.16.0.0/12      34.32.0.0/11
+        34.64.0.0/10      34.128.0.0/10
+        35.184.0.0/13     35.192.0.0/14
+        35.196.0.0/15     35.198.0.0/16
+        35.199.0.0/17     35.200.0.0/13
+        35.208.0.0/12     35.224.0.0/12
+        35.240.0.0/13     35.252.0.0/14
+        64.15.112.0/20    64.233.160.0/19
+        66.102.0.0/20     66.249.64.0/19
+        70.32.128.0/19    72.14.192.0/18
+        74.114.24.0/21    74.125.0.0/16
+        104.154.0.0/15    104.196.0.0/14
+        107.167.160.0/19  107.178.192.0/18
+        108.59.80.0/20    108.170.192.0/18
+        108.177.0.0/17    130.211.0.0/16
+        142.250.0.0/15    146.148.0.0/17
+        162.216.148.0/22  162.222.176.0/21
+        172.110.32.0/21   172.217.0.0/16
+        172.253.0.0/16    173.194.0.0/16
+        173.255.112.0/20  192.158.28.0/22
+        192.178.0.0/15    199.36.154.0/23
+        199.36.156.0/24   199.192.112.0/22
+        199.223.232.0/21  207.175.0.0/16
+        208.65.152.0/22   208.68.108.0/22
+        208.81.188.0/22   208.117.224.0/19
+        209.85.128.0/17   216.58.192.0/19
+        216.73.80.0/20    216.239.32.0/19
+        216.252.220.0/22  200.226.0.0/16
+        207.223.160.0/20
+    )
+
+    local _r _n=0
+    for _r in "${_ranges[@]}"; do
+        cmd iptables -A PM_WEBBLOCK -d "$_r" -j PM_REJECT
+        (( _n++ ))
+    done
+
+    # IPv6 — rangos de Google AS15169 en ip6tables
+    for _r6 in \
+        2607:f8b0::/32 \
+        2404:6800::/32 \
+        2a00:1450::/32 \
+        2001:4860::/32 \
+        2800:3f0::/32  \
+        2c0f:fb50::/32 \
+        2001:4860:4860::8888/128 \
+        2001:4860:4860::8844/128; do
+        ip6tables -A PM_WEBBLOCK -d "$_r6" -j REJECT 2>/dev/null || true
+    done
+
+    logc "$_n reglas iptables CIDR bloqueando rangos Google/YouTube"
 }
 
 # =============================================================================
@@ -1216,7 +1310,8 @@ enable_firewall() {
     # Calcular total de pasos
     local total=7  # base + ipsets + SNI + DNS-hex + DNS-proxy + hosts + firefox
     [[ "$BLOCK_FACEBOOK" == "true" ]] && (( total++ ))
-    [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))
+    [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))  # ipset resolve
+    [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))  # rangos CIDR goog.json
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && (( total++ ))
     [[ -n "$MAC_BLOCKS_STR" ]]  && (( total++ ))
     [[ -n "$CONN_LIMITS_STR" ]] && (( total++ ))
@@ -1236,6 +1331,9 @@ enable_firewall() {
         (( step++ ))
         _animated_block_site $step $total "YouTube" "PM_YOUTUBE" YT_IPSET_DOMAINS \
             "tcp:80" "tcp:443" "udp:443" "tcp:853:any" "udp:853:any"
+        draw_progress_bar $step $total
+
+        (( step++ )); run_step $step $total "Bloqueando rangos IP Google/YouTube (iptables CIDR)" apply_goog_ranges_iptables
         draw_progress_bar $step $total
     fi
     if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
