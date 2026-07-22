@@ -448,7 +448,10 @@ apply_all_hosts() {
     [[ ${#all[@]} -eq 0 ]] && return
     {
         printf '\n%s\n' "$HOSTS_MARKER_START"
-        for d in "${all[@]}"; do printf '0.0.0.0 %s\n' "$d"; done
+        for d in "${all[@]}"; do
+            printf '0.0.0.0 %s\n' "$d"   # bloqueo IPv4
+            printf ':: %s\n'     "$d"    # bloqueo IPv6 — evita bypass por AAAA records
+        done
         printf '%s\n' "$HOSTS_MARKER_END"
     } >> /etc/hosts
     if [[ -n "$CMD_LOG" ]]; then
@@ -505,9 +508,11 @@ remove_firefox_doh_block() {
 # IPTABLES BASE
 # =============================================================================
 setup_base_chains() {
-    logsec "Cadenas iptables"
-    # Asegurar módulo de string matching disponible
+    logsec "Cadenas iptables + ip6tables"
+    # Módulo de string matching (SNI)
     modprobe xt_string 2>/dev/null || true
+
+    # ── IPv4 ────────────────────────────────────────────────────────────────────
     for chain in PM_REJECT PM_WEBBLOCK PM_MACBLOCK PM_CONNLIMIT; do
         iptables -F "$chain" 2>/dev/null || true
         iptables -X "$chain" 2>/dev/null || true
@@ -518,6 +523,8 @@ setup_base_chains() {
     iptables -D FORWARD -j PM_CONNLIMIT 2>/dev/null || true
     iptables -D FORWARD -j PM_WEBBLOCK  2>/dev/null || true
     iptables -D OUTPUT  -j PM_WEBBLOCK  2>/dev/null || true
+    # Permitir respuestas de conexiones establecidas en FORWARD (server→client)
+    iptables -D FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
     cmd iptables -N PM_REJECT
     cmd iptables -N PM_WEBBLOCK
     cmd iptables -N PM_MACBLOCK
@@ -525,14 +532,28 @@ setup_base_chains() {
     cmd iptables -A PM_REJECT -j LOG --log-prefix "PM-DROP: " --log-level 4
     cmd iptables -A PM_REJECT -p tcp -j REJECT --reject-with tcp-reset
     cmd iptables -A PM_REJECT -j REJECT --reject-with icmp-port-unreachable
+    # ESTABLISHED/RELATED primero — tráfico servidor→cliente (respuestas) siempre pasa
+    cmd iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
     cmd iptables -A FORWARD -j PM_MACBLOCK
     cmd iptables -A FORWARD -j PM_CONNLIMIT
     cmd iptables -A FORWARD -j PM_WEBBLOCK
     cmd iptables -A OUTPUT  -j PM_WEBBLOCK
+
+    # ── IPv6 — misma estructura para bloquear bypass por AAAA records ───────────
+    ip6tables -F PM_WEBBLOCK 2>/dev/null || true
+    ip6tables -X PM_WEBBLOCK 2>/dev/null || true
+    ip6tables -D FORWARD -j PM_WEBBLOCK 2>/dev/null || true
+    ip6tables -D OUTPUT  -j PM_WEBBLOCK 2>/dev/null || true
+    ip6tables -D FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    ip6tables -N PM_WEBBLOCK 2>/dev/null || true
+    ip6tables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    ip6tables -A FORWARD -j PM_WEBBLOCK 2>/dev/null || true
+    ip6tables -A OUTPUT  -j PM_WEBBLOCK 2>/dev/null || true
+
     cmd sysctl -w net.ipv4.ip_forward=1
-    # Matar conexiones TCP existentes para que las nuevas reglas apliquen
+    # Limpiar conexiones activas para que las reglas apliquen inmediatamente
     conntrack -F 2>/dev/null || true
-    logc "IP Forwarding activado — conexiones previas vaciadas"
+    logc "Cadenas IPv4+IPv6 configuradas — ESTABLISHED/RELATED permitido (server->client)"
 }
 
 # =============================================================================
@@ -589,34 +610,45 @@ apply_sni_rules() {
     local domain
     if [[ "$BLOCK_FACEBOOK" == "true" ]]; then
         for domain in "${sni_fb[@]}"; do
-            cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
+            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 443 \
                 -m string --string "$domain" --algo bm -j PM_REJECT
-            cmd iptables -A PM_WEBBLOCK -p tcp --dport 80 \
+            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 80  \
                 -m string --string "$domain" --algo bm -j PM_REJECT
+            ip6tables -A PM_WEBBLOCK -p tcp --dport 443 \
+                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
+            ip6tables -A PM_WEBBLOCK -p tcp --dport 80  \
+                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
         done
-        logc "Facebook SNI: ${#sni_fb[@]} dominios"
+        logc "Facebook SNI: ${#sni_fb[@]} dominios (IPv4+IPv6)"
     fi
     if [[ "$BLOCK_YOUTUBE" == "true" ]]; then
         for domain in "${sni_yt[@]}"; do
-            cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
+            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 443 \
                 -m string --string "$domain" --algo bm -j PM_REJECT
-            cmd iptables -A PM_WEBBLOCK -p tcp --dport 80 \
+            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 80  \
                 -m string --string "$domain" --algo bm -j PM_REJECT
+            ip6tables -A PM_WEBBLOCK -p tcp --dport 443 \
+                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
+            ip6tables -A PM_WEBBLOCK -p tcp --dport 80  \
+                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
         done
-        # Bloqueo global QUIC/HTTP3 — YouTube lo usa agresivamente y no tiene SNI visible.
-        # Si Firefox tiene la IP cacheada y QUIC no está bloqueado, bypasea todo lo demás.
-        # Sitios que no son YouTube seguirán usando TCP normalmente.
+        # Bloqueo global QUIC/HTTP3 IPv4 + IPv6 — YouTube lo usa agresivamente
         cmd iptables -A PM_WEBBLOCK -p udp --dport 443 -j PM_REJECT
-        logc "YouTube SNI: ${#sni_yt[@]} dominios + QUIC (UDP 443) bloqueado globalmente"
+        ip6tables -A PM_WEBBLOCK -p udp --dport 443 -j REJECT 2>/dev/null || true
+        logc "YouTube SNI: ${#sni_yt[@]} dominios + QUIC UDP 443 (IPv4+IPv6)"
     fi
     if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
         for domain in "${sni_hm[@]}"; do
-            cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 \
+            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 443 \
                 -m string --string "$domain" --algo bm -j PM_REJECT
-            cmd iptables -A PM_WEBBLOCK -p tcp --dport 80 \
+            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 80  \
                 -m string --string "$domain" --algo bm -j PM_REJECT
+            ip6tables -A PM_WEBBLOCK -p tcp --dport 443 \
+                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
+            ip6tables -A PM_WEBBLOCK -p tcp --dport 80  \
+                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
         done
-        logc "Hotmail SNI: ${#sni_hm[@]} dominios"
+        logc "Hotmail SNI: ${#sni_hm[@]} dominios (IPv4+IPv6)"
     fi
 }
 
@@ -917,7 +949,7 @@ PYEOF
 setup_dns_proxy() {
     logsec "DNS proxy en port 53 (reemplaza systemd-resolved)"
 
-    # ── 1. Upstream DNS real ANTES de parar systemd-resolved ────────────────────
+    # ── 1. Upstream DNS real ANTES de tocar nada ────────────────────────────────
     local _up
     _up=$(awk '/^nameserver/ && $2 !~ /^127\./{print $2; exit}' \
           /run/systemd/resolve/resolv.conf 2>/dev/null)
@@ -926,23 +958,43 @@ setup_dns_proxy() {
               /etc/resolv.conf 2>/dev/null)
     [[ -z "$_up" ]] && _up="8.8.8.8"
 
-    # ── 2. Parar systemd-resolved → libera port 53 ──────────────────────────────
-    # Sin esto, Python no puede bindear port 53 (ya ocupado)
+    # ── 2. Detener todo lo que pueda ocupar port 53 ─────────────────────────────
+    # dnsmasq compite con systemd-resolved en algunas instalaciones de Kali
+    cmd systemctl stop dnsmasq        2>/dev/null || true
     cmd systemctl stop systemd-resolved 2>/dev/null || true
-    pkill -f "systemd-resolved" 2>/dev/null || true
+    pkill -f "dnsmasq"               2>/dev/null || true
+    pkill -f "systemd-resolved"      2>/dev/null || true
     sleep 0.5
 
-    # ── 3. Reemplazar /etc/resolv.conf para que todo DNS vaya a nuestro proxy ───
-    # Si es symlink (Kali con systemd-resolved usa stub-resolv.conf), guardamos target
+    # ── 3. Evitar que NetworkManager sobreescriba resolv.conf ───────────────────
+    # NM detecta que systemd-resolved murió y lo reinicia o reescribe resolv.conf.
+    # Con dns=none le decimos que no toque DNS en absoluto.
+    local _nm_conf="/etc/NetworkManager/conf.d/99-mfirewall-dns.conf"
+    if command -v nmcli &>/dev/null; then
+        mkdir -p /etc/NetworkManager/conf.d
+        printf '[main]\ndns=none\n' > "$_nm_conf"
+        cmd systemctl reload NetworkManager 2>/dev/null || \
+            cmd systemctl restart NetworkManager 2>/dev/null || true
+        sleep 0.4
+        logc "NetworkManager: dns=none aplicado"
+    fi
+
+    # ── 4. Reemplazar /etc/resolv.conf ──────────────────────────────────────────
+    # Guardar estado original para restaurar en teardown
+    chattr -i /etc/resolv.conf 2>/dev/null || true   # quitar inmutable si ya estaba
     if [[ -L /etc/resolv.conf ]]; then
         readlink /etc/resolv.conf > /var/run/mfirewall-resolv-symlink 2>/dev/null || true
         rm -f /etc/resolv.conf
     else
         cp /etc/resolv.conf /etc/resolv.conf.mfirewall_bak 2>/dev/null || true
+        rm -f /etc/resolv.conf
     fi
     echo "nameserver 127.0.0.1" > /etc/resolv.conf
+    # Hacer inmutable — ningún proceso puede modificarlo mientras el firewall esté activo
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    logc "/etc/resolv.conf fijado en 127.0.0.1 (inmutable)"
 
-    # ── 4. Keywords a bloquear ──────────────────────────────────────────────────
+    # ── 5. Keywords a bloquear ──────────────────────────────────────────────────
     local -a _kws=()
     [[ "$BLOCK_YOUTUBE"  == "true" ]] && \
         _kws+=(youtube googlevideo ytimg youtu youtube-nocookie youtubei)
@@ -950,18 +1002,20 @@ setup_dns_proxy() {
         _kws+=(facebook fbcdn messenger instagram fbsbx)
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && \
         _kws+=(hotmail outlook microsoftonline live.com office365)
-    # Bloquear DoH providers — Firefox intenta usar Cloudflare/Google DNS-over-HTTPS
+    # Bloquear resolución de servidores DoH para impedir bypass HTTPS
     _kws+=(dns.google cloudflare-dns dns.quad9 use-application-dns mozilla.cloudflare)
     local _csv
     _csv=$(IFS=','; echo "${_kws[*]}")
 
-    # ── 5. Kill instancia previa ─────────────────────────────────────────────────
+    # ── 6. Kill instancia previa del proxy ──────────────────────────────────────
     if [[ -f "$DNS_PROXY_PID_FILE" ]]; then
         kill "$(cat "$DNS_PROXY_PID_FILE")" 2>/dev/null || true
         rm -f "$DNS_PROXY_PID_FILE"
     fi
+    pkill -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
+    sleep 0.3
 
-    # ── 6. Proxy en port 53 directo — sin REDIRECT, sin loops ───────────────────
+    # ── 7. Proxy en port 53 directo ─────────────────────────────────────────────
     _write_dns_proxy_script
     [[ -n "$CMD_LOG" ]] && printf '[%s] [CMD] python3 %s %s 53 %s &\n' \
         "$(date +%H:%M:%S)" "$DNS_PROXY_SCRIPT" "$_up" "$_csv" >> "$CMD_LOG"
@@ -969,17 +1023,47 @@ setup_dns_proxy() {
     local _pid=$!
     disown "$_pid"
     echo "$_pid" > "$DNS_PROXY_PID_FILE"
-    sleep 0.8  # esperar que Python bindee el socket
+    sleep 1.0  # esperar que Python bindee el socket
 
-    # ── 7. Bloquear IPs de servidores DoH — Firefox los tiene hardcodeados ──────
-    # Sin esto Firefox hace DoH a Cloudflare (1.1.1.1) sin pasar por nuestro proxy
+    # ── 8. Verificar que el proxy realmente está escuchando en :53 ──────────────
+    # CRÍTICO: verificar con ss, NO con dig. dig retorna vacío tanto si hay NXDOMAIN
+    # como si no hay nada en port 53 → falso positivo. ss es la fuente de verdad.
+    local _proxy_ok=false
+    if ss -ulnp 2>/dev/null | grep -q ':53 '; then
+        _proxy_ok=true
+        logc "✓ Proxy confirmado activo en UDP :53"
+    elif ss -ulnp 2>/dev/null | grep -q ':53$'; then
+        _proxy_ok=true
+        logc "✓ Proxy confirmado activo en UDP :53"
+    else
+        logc "AVISO: No se detectó proceso en UDP :53 — verificar manualmente"
+        logc "  Comando: ss -ulnp | grep ':53'"
+    fi
+
+    # Verificación adicional con dig (informativa, no concluyente)
+    local _test
+    _test=$(dig +short +time=2 youtube.com @127.0.0.1 2>/dev/null | head -1 || true)
+    if [[ -z "$_test" && "$_proxy_ok" == "true" ]]; then
+        logc "✓ DNS: youtube.com → NXDOMAIN (upstream: $_up)"
+    elif [[ -n "$_test" ]]; then
+        logc "AVISO: youtube.com resolvio a '$_test'"
+    fi
+
+    # ── 9. Bloquear IPs de servidores DoH — Firefox los tiene hardcodeados ──────
+    # IPv4 DoH IPs (Cloudflare, Google, Quad9)
     for _doh in 1.1.1.1 1.0.0.1 104.16.248.249 104.16.249.249 \
                 8.8.8.8 8.8.4.4 9.9.9.9 9.9.9.10; do
         cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 -d "$_doh" -j PM_REJECT
         cmd iptables -A PM_WEBBLOCK -p udp --dport 443 -d "$_doh" -j PM_REJECT
     done
+    # IPv6 DoH IPs
+    for _doh6 in 2606:4700:4700::1111 2606:4700:4700::1001 \
+                 2001:4860:4860::8888 2001:4860:4860::8844; do
+        ip6tables -A PM_WEBBLOCK -p tcp --dport 443 -d "$_doh6" -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -p udp --dport 443 -d "$_doh6" -j REJECT 2>/dev/null || true
+    done
 
-    # ── 8. Matar Firefox + limpiar TODO el caché ─────────────────────────────────
+    # ── 10. Matar Firefox + limpiar TODO el caché ────────────────────────────────
     pkill -9 -f "firefox" 2>/dev/null || true
     local _ff_tries=0
     while (( _ff_tries++ < 20 )) && pgrep -f "firefox" >/dev/null 2>&1; do
@@ -987,37 +1071,22 @@ setup_dns_proxy() {
         sleep 0.3
     done
 
-    # HTTP cache en disco (Firefox carga YouTube aunque DNS devuelva NXDOMAIN
-    # si tiene el HTML/JS guardado en cache2/)
-    local _cache_dir
-    for _cache_dir in /root/.cache/mozilla/firefox /home/*/.cache/mozilla/firefox; do
-        [[ -d "$_cache_dir" ]] || continue
-        find "$_cache_dir" -maxdepth 3 -type d -name "cache2" \
-            -exec rm -rf {} \; 2>/dev/null || true
-    done
+    # HTTP cache en disco — borrado directo, más confiable que find -exec
+    rm -rf /root/.cache/mozilla/firefox/*/cache2           2>/dev/null || true
+    rm -rf /home/*/.cache/mozilla/firefox/*/cache2         2>/dev/null || true
 
-    # Sessionstore — evita que Firefox reabra pestaña de YouTube
+    # Sessionstore — evita que Firefox reabra pestaña bloqueada
     local _prof
     for _prof in /root/.mozilla/firefox/*.default* \
                  /root/.mozilla/firefox/*.default-esr* \
                  /home/*/.mozilla/firefox/*.default* \
                  /home/*/.mozilla/firefox/*.default-esr*; do
         [[ -d "$_prof" ]] || continue
-        rm -f  "$_prof/sessionstore.jsonlz4"  2>/dev/null || true
-        rm -rf "$_prof/sessionstore-backups"   2>/dev/null || true
+        rm -f  "$_prof/sessionstore.jsonlz4" 2>/dev/null || true
+        rm -rf "$_prof/sessionstore-backups" 2>/dev/null || true
     done
 
-    # ── 9. Verificar ─────────────────────────────────────────────────────────────
-    sleep 0.5
-    local _test
-    _test=$(dig +short +time=2 youtube.com 2>/dev/null | head -1 || true)
-    if [[ -z "$_test" ]]; then
-        logc "✓ DNS proxy OK: youtube.com → NXDOMAIN (upstream: $_up)"
-    else
-        logc "AVISO: youtube.com resolvió a '$_test' — proxy no interceptó"
-    fi
-
-    logc "DNS proxy PID=$_pid · port=53 · upstream=$_up"
+    logc "DNS proxy PID=$_pid | port=53 | upstream=$_up | NM dns=none"
 }
 
 teardown_dns_proxy() {
@@ -1033,6 +1102,9 @@ teardown_dns_proxy() {
     pkill -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
     rm -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
 
+    # Quitar inmutable antes de tocar resolv.conf
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+
     # Restaurar /etc/resolv.conf
     rm -f /etc/resolv.conf 2>/dev/null || true
     if [[ -f /var/run/mfirewall-resolv-symlink ]]; then
@@ -1040,11 +1112,25 @@ teardown_dns_proxy() {
         _tgt=$(cat /var/run/mfirewall-resolv-symlink)
         ln -sf "$_tgt" /etc/resolv.conf 2>/dev/null || true
         rm -f /var/run/mfirewall-resolv-symlink
+        logc "resolv.conf: symlink restaurado → $_tgt"
     elif [[ -f /etc/resolv.conf.mfirewall_bak ]]; then
         mv /etc/resolv.conf.mfirewall_bak /etc/resolv.conf
+        logc "resolv.conf: backup restaurado"
+    else
+        # Fallback mínimo
+        printf 'nameserver 8.8.8.8\nnameserver 8.8.4.4\n' > /etc/resolv.conf
+        logc "resolv.conf: fallback a 8.8.8.8"
     fi
 
-    # Reiniciar systemd-resolved
+    # Restaurar NetworkManager DNS management y systemd-resolved
+    local _nm_conf="/etc/NetworkManager/conf.d/99-mfirewall-dns.conf"
+    if [[ -f "$_nm_conf" ]]; then
+        rm -f "$_nm_conf"
+        cmd systemctl reload NetworkManager 2>/dev/null || \
+            cmd systemctl restart NetworkManager 2>/dev/null || true
+        sleep 0.3
+        logc "NetworkManager: dns=none eliminado, DNS management restaurado"
+    fi
     cmd systemctl start systemd-resolved 2>/dev/null || true
 
     logc "DNS proxy detenido, DNS restaurado"
@@ -1147,9 +1233,11 @@ disable_firewall() {
     gradient_print "  Desactivando M-FIREWALL..." GRAD[@] 4
     printf '\n\n'
 
-    local total=6 step=0
+    local total=5 step=0
 
     _flush_chains() {
+        # IPv4
+        iptables -D FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
         for chain in PM_REJECT PM_WEBBLOCK PM_MACBLOCK PM_CONNLIMIT; do
             iptables -F "$chain" 2>/dev/null || true
             iptables -X "$chain" 2>/dev/null || true
@@ -1160,7 +1248,13 @@ disable_firewall() {
         iptables -D OUTPUT  -j PM_WEBBLOCK  2>/dev/null || true
         iptables -t nat -F PREROUTING 2>/dev/null || true
         iptables -t nat -F OUTPUT     2>/dev/null || true
-        logc "Cadenas eliminadas"
+        # IPv6
+        ip6tables -D FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+        ip6tables -D FORWARD -j PM_WEBBLOCK 2>/dev/null || true
+        ip6tables -D OUTPUT  -j PM_WEBBLOCK 2>/dev/null || true
+        ip6tables -F PM_WEBBLOCK 2>/dev/null || true
+        ip6tables -X PM_WEBBLOCK 2>/dev/null || true
+        logc "Cadenas IPv4+IPv6 eliminadas"
     }
 
     (( step++ )); run_step $step $total "Deteniendo DNS proxy" teardown_dns_proxy
@@ -1212,26 +1306,23 @@ deep_reset() {
 
     _flush_all_tables() {
         for t in filter nat mangle raw; do
-            iptables -t "$t" -F 2>/dev/null || true
-            iptables -t "$t" -X 2>/dev/null || true
-        done
-        iptables -P INPUT   ACCEPT 2>/dev/null
-        iptables -P FORWARD ACCEPT 2>/dev/null
-        iptables -P OUTPUT  ACCEPT 2>/dev/null
-        for t in filter nat mangle raw; do
+            iptables  -t "$t" -F 2>/dev/null || true
+            iptables  -t "$t" -X 2>/dev/null || true
             ip6tables -t "$t" -F 2>/dev/null || true
             ip6tables -t "$t" -X 2>/dev/null || true
         done
-        logc "Todas las tablas iptables vaciadas"
+        iptables -P INPUT   ACCEPT 2>/dev/null || true
+        iptables -P FORWARD ACCEPT 2>/dev/null || true
+        iptables -P OUTPUT  ACCEPT 2>/dev/null || true
+        ip6tables -P INPUT   ACCEPT 2>/dev/null || true
+        ip6tables -P FORWARD ACCEPT 2>/dev/null || true
+        ip6tables -P OUTPUT  ACCEPT 2>/dev/null || true
+        logc "Todas las tablas iptables/ip6tables vaciadas"
     }
     _destroy_ipsets() { cmd ipset destroy 2>/dev/null || true; logc "ipsets destruidos"; }
-    _restore_resolv() {
-        if [[ ! -s "/etc/resolv.conf" ]] || ! grep -q "nameserver" /etc/resolv.conf; then
-            cmd bash -c 'printf "nameserver 8.8.8.8\nnameserver 8.8.4.4\n" > /etc/resolv.conf'
-        fi
-        logc "/etc/resolv.conf verificado"
-    }
 
+    (( step++ )); run_step $step $total "Deteniendo DNS proxy" teardown_dns_proxy
+    draw_progress_bar $step $total
     (( step++ )); run_step $step $total "Vaciando todas las tablas iptables" _flush_all_tables
     draw_progress_bar $step $total
     (( step++ )); run_step $step $total "Destruyendo ipsets" _destroy_ipsets
@@ -1239,8 +1330,6 @@ deep_reset() {
     (( step++ )); run_step $step $total "Limpiando /etc/hosts" remove_hosts_block
     draw_progress_bar $step $total
     (( step++ )); run_step $step $total "Quitando políticas Firefox" remove_firefox_doh_block
-    draw_progress_bar $step $total
-    (( step++ )); run_step $step $total "Restaurando /etc/resolv.conf" _restore_resolv
     draw_progress_bar $step $total
     (( step++ )); run_step $step $total "Limpiando caché DNS" flush_dns
     draw_progress_bar $step $total
@@ -1301,6 +1390,13 @@ show_status() {
         printf '  \e[38;5;27m│\e[0m  \e[38;5;46mFirefox DoH      deshabilitado\e[0m\n'
     else
         printf '  \e[38;5;27m│\e[0m  \e[38;5;196mFirefox DoH      ACTIVO — bypass posible\e[0m\n'
+    fi
+
+    if [[ -f "$DNS_PROXY_PID_FILE" ]] && kill -0 "$(cat "$DNS_PROXY_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        local _dpid; _dpid=$(cat "$DNS_PROXY_PID_FILE")
+        printf "  \e[38;5;27m│\e[0m  \e[38;5;46mDNS proxy        PID=%-6s (127.0.0.1:53)\e[0m\n" "$_dpid"
+    else
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;240mDNS proxy        inactivo\e[0m\n'
     fi
 
     printf '  \e[38;5;27m├──────────────────────────────────────────┤\e[0m\n'
@@ -1405,8 +1501,17 @@ draw_mini_dashboard() {
         [[ -f "$_ffd/policies.json" ]] && _ff=true && break
     done
     [[ "$_ff" == true ]] \
-        && printf '·  \e[38;5;46mFirefox DoH deshabilitado\e[0m\n' \
+        && printf '·  \e[38;5;46mFirefox DoH OFF\e[0m\n' \
         || printf '·  \e[38;5;196mFirefox DoH ACTIVO\e[0m\n'
+
+    # DNS Proxy status
+    printf '  \e[38;5;27m│\e[0m  '
+    if [[ -f "$DNS_PROXY_PID_FILE" ]] && kill -0 "$(cat "$DNS_PROXY_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        local _dpid; _dpid=$(cat "$DNS_PROXY_PID_FILE")
+        printf '\e[38;5;46m●\e[0m  DNS proxy activo  \e[38;5;240m(PID=%s · /etc/resolv.conf=127.0.0.1)\e[0m\n' "$_dpid"
+    else
+        printf '\e[38;5;240m○  DNS proxy inactivo\e[0m\n'
+    fi
 
     printf '  \e[38;5;27m╰──────────────────────────────────────────────────────────────╯\e[0m\n'
     printf '\n'
