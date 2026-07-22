@@ -885,35 +885,65 @@ flush_dns() {
 _write_dns_proxy_script() {
     cat > "$DNS_PROXY_SCRIPT" << 'PYEOF'
 #!/usr/bin/env python3
-"""M-FIREWALL DNS proxy — retorna NXDOMAIN para dominios bloqueados."""
-import sys, socket, threading, signal
+"""M-FIREWALL DNS proxy — NXDOMAIN para dominios bloqueados.
+
+Arquitectura anti-loop con SO_MARK:
+  - Upstream queries llevan SO_MARK=7331 en el socket UDP
+  - iptables NAT OUTPUT tiene RETURN para paquetes marcados con 0x1CA3
+  - Cualquier otro proceso que mande DNS → REDIRECT al proxy → bloqueado/forwarded
+  - El proxy mismo → marcado → RETURN → llega al upstream real sin loop
+"""
+import sys, socket, threading, signal, struct, os
 
 upstream  = sys.argv[1]
 port      = int(sys.argv[2])
 blocked   = [k.lower() for k in sys.argv[3].split(',') if k.strip()]
 
+# SO_MARK = 36 en Linux — marca paquetes para que iptables los distinga
+SO_MARK   = 36
+MARK_VAL  = 0x1CA3  # marca arbitraria, coincide con regla iptables
+
 def nxdomain(data):
-    """Construye respuesta DNS NXDOMAIN (RCODE=3) a partir del query original."""
     if len(data) < 12:
         return data
-    return (data[:2]            # Transaction ID (2 bytes)
-            + b'\x81\x83'       # Flags: QR=1 AA=0 TC=0 RD=1 RA=1 RCODE=3(NXDOMAIN)
-            + data[4:6]         # QDCOUNT del query original
-            + b'\x00\x00'       # ANCOUNT = 0
-            + b'\x00\x00'       # NSCOUNT = 0
-            + b'\x00\x00'       # ARCOUNT = 0
-            + data[12:])        # Question section original
+    return (data[:2]         # Transaction ID
+            + b'\x81\x83'    # QR=1 RCODE=3 (NXDOMAIN)
+            + data[4:6]      # QDCOUNT original
+            + b'\x00\x00'    # ANCOUNT = 0
+            + b'\x00\x00'    # NSCOUNT = 0
+            + b'\x00\x00'    # ARCOUNT = 0
+            + data[12:])     # Question section
+
+def extract_qname(data):
+    """Extrae el nombre de dominio del query para log."""
+    try:
+        pos = 12
+        labels = []
+        while pos < len(data):
+            length = data[pos]
+            if length == 0:
+                break
+            labels.append(data[pos+1:pos+1+length].decode('ascii', errors='replace'))
+            pos += 1 + length
+        return '.'.join(labels)
+    except Exception:
+        return '?'
 
 def handle(data, addr, sock):
     payload = data.lower()
-    if any(kw.encode() in payload for kw in blocked):
+    matched = next((kw for kw in blocked if kw.encode() in payload), None)
+    if matched:
         try:
             sock.sendto(nxdomain(data), addr)
         except Exception:
             pass
         return
-    # Reenviar al upstream real
+    # Reenviar al upstream — socket marcado con SO_MARK para evitar loop iptables
     up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        up.setsockopt(socket.SOL_SOCKET, SO_MARK, MARK_VAL)
+    except (OSError, AttributeError):
+        pass  # si el kernel no soporta SO_MARK, funciona igual pero sin anti-loop
     up.settimeout(3.0)
     try:
         up.sendto(data, (upstream, 53))
@@ -928,10 +958,13 @@ def handle(data, addr, sock):
         up.close()
 
 def main():
+    # 0.0.0.0 acepta: loopback (local), REDIRECT de otras IPs (gateway mode)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('127.0.0.1', port))
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    sock.bind(('0.0.0.0', port))
     signal.signal(signal.SIGTERM, lambda *_: (sock.close(), sys.exit(0)))
+    signal.signal(signal.SIGINT,  lambda *_: (sock.close(), sys.exit(0)))
     while True:
         try:
             data, addr = sock.recvfrom(4096)
@@ -947,9 +980,9 @@ PYEOF
 }
 
 setup_dns_proxy() {
-    logsec "DNS proxy en port 53 (reemplaza systemd-resolved)"
+    logsec "DNS proxy + NAT intercept (anti-bypass total)"
 
-    # ── 1. Upstream DNS real ANTES de tocar nada ────────────────────────────────
+    # 1. Upstream DNS antes de tocar nada
     local _up
     _up=$(awk '/^nameserver/ && $2 !~ /^127\./{print $2; exit}' \
           /run/systemd/resolve/resolv.conf 2>/dev/null)
@@ -958,30 +991,33 @@ setup_dns_proxy() {
               /etc/resolv.conf 2>/dev/null)
     [[ -z "$_up" ]] && _up="8.8.8.8"
 
-    # ── 2. Detener todo lo que pueda ocupar port 53 ─────────────────────────────
-    # dnsmasq compite con systemd-resolved en algunas instalaciones de Kali
-    cmd systemctl stop dnsmasq        2>/dev/null || true
-    cmd systemctl stop systemd-resolved 2>/dev/null || true
-    pkill -f "dnsmasq"               2>/dev/null || true
-    pkill -f "systemd-resolved"      2>/dev/null || true
-    sleep 0.5
+    # 2. Liberar port 53 — matar TODO lo que pueda estar ocupándolo
+    for _svc in systemd-resolved dnsmasq named unbound; do
+        cmd systemctl stop "$_svc" 2>/dev/null || true
+        pkill -9 -f "$_svc"        2>/dev/null || true
+    done
+    sleep 0.6
+    # Verificar que port 53 esté libre (si no, forzar liberación)
+    if ss -ulnp 2>/dev/null | grep -q ':53[[:space:]]'; then
+        local _blocker
+        _blocker=$(ss -ulnp 2>/dev/null | grep ':53[[:space:]]' | grep -oP 'pid=\K[0-9]+' | head -1)
+        [[ -n "$_blocker" ]] && kill -9 "$_blocker" 2>/dev/null || true
+        sleep 0.3
+    fi
 
-    # ── 3. Evitar que NetworkManager sobreescriba resolv.conf ───────────────────
-    # NM detecta que systemd-resolved murió y lo reinicia o reescribe resolv.conf.
-    # Con dns=none le decimos que no toque DNS en absoluto.
+    # 3. NetworkManager: no tocar DNS
     local _nm_conf="/etc/NetworkManager/conf.d/99-mfirewall-dns.conf"
     if command -v nmcli &>/dev/null; then
         mkdir -p /etc/NetworkManager/conf.d
         printf '[main]\ndns=none\n' > "$_nm_conf"
         cmd systemctl reload NetworkManager 2>/dev/null || \
             cmd systemctl restart NetworkManager 2>/dev/null || true
-        sleep 0.4
-        logc "NetworkManager: dns=none aplicado"
+        sleep 0.5
+        logc "NetworkManager: dns=none activo"
     fi
 
-    # ── 4. Reemplazar /etc/resolv.conf ──────────────────────────────────────────
-    # Guardar estado original para restaurar en teardown
-    chattr -i /etc/resolv.conf 2>/dev/null || true   # quitar inmutable si ya estaba
+    # 4. resolv.conf -> 127.0.0.1 + inmutable
+    chattr -i /etc/resolv.conf 2>/dev/null || true
     if [[ -L /etc/resolv.conf ]]; then
         readlink /etc/resolv.conf > /var/run/mfirewall-resolv-symlink 2>/dev/null || true
         rm -f /etc/resolv.conf
@@ -989,25 +1025,24 @@ setup_dns_proxy() {
         cp /etc/resolv.conf /etc/resolv.conf.mfirewall_bak 2>/dev/null || true
         rm -f /etc/resolv.conf
     fi
-    echo "nameserver 127.0.0.1" > /etc/resolv.conf
-    # Hacer inmutable — ningún proceso puede modificarlo mientras el firewall esté activo
+    printf 'nameserver 127.0.0.1\n' > /etc/resolv.conf
     chattr +i /etc/resolv.conf 2>/dev/null || true
-    logc "/etc/resolv.conf fijado en 127.0.0.1 (inmutable)"
+    logc "resolv.conf → 127.0.0.1 (inmutable)"
 
-    # ── 5. Keywords a bloquear ──────────────────────────────────────────────────
+    # 5. Keywords
     local -a _kws=()
     [[ "$BLOCK_YOUTUBE"  == "true" ]] && \
-        _kws+=(youtube googlevideo ytimg youtu youtube-nocookie youtubei)
+        _kws+=(youtube googlevideo ytimg youtu youtube-nocookie youtubei ggpht gvt1)
     [[ "$BLOCK_FACEBOOK" == "true" ]] && \
         _kws+=(facebook fbcdn messenger instagram fbsbx)
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && \
         _kws+=(hotmail outlook microsoftonline live.com office365)
-    # Bloquear resolución de servidores DoH para impedir bypass HTTPS
+    # Bloquear resolución de servidores DoH
     _kws+=(dns.google cloudflare-dns dns.quad9 use-application-dns mozilla.cloudflare)
     local _csv
     _csv=$(IFS=','; echo "${_kws[*]}")
 
-    # ── 6. Kill instancia previa del proxy ──────────────────────────────────────
+    # 6. Kill proxy anterior
     if [[ -f "$DNS_PROXY_PID_FILE" ]]; then
         kill "$(cat "$DNS_PROXY_PID_FILE")" 2>/dev/null || true
         rm -f "$DNS_PROXY_PID_FILE"
@@ -1015,7 +1050,7 @@ setup_dns_proxy() {
     pkill -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
     sleep 0.3
 
-    # ── 7. Proxy en port 53 directo ─────────────────────────────────────────────
+    # 7. Arrancar proxy en 0.0.0.0:53
     _write_dns_proxy_script
     [[ -n "$CMD_LOG" ]] && printf '[%s] [CMD] python3 %s %s 53 %s &\n' \
         "$(date +%H:%M:%S)" "$DNS_PROXY_SCRIPT" "$_up" "$_csv" >> "$CMD_LOG"
@@ -1023,47 +1058,59 @@ setup_dns_proxy() {
     local _pid=$!
     disown "$_pid"
     echo "$_pid" > "$DNS_PROXY_PID_FILE"
-    sleep 1.0  # esperar que Python bindee el socket
+    sleep 1.2
 
-    # ── 8. Verificar que el proxy realmente está escuchando en :53 ──────────────
-    # CRÍTICO: verificar con ss, NO con dig. dig retorna vacío tanto si hay NXDOMAIN
-    # como si no hay nada en port 53 → falso positivo. ss es la fuente de verdad.
+    # 8. Verificar con ss (fuente de verdad real, no dig)
     local _proxy_ok=false
-    if ss -ulnp 2>/dev/null | grep -q ':53 '; then
+    if ss -ulnp 2>/dev/null | grep -qE ':[0-9]*53[^0-9]'; then
         _proxy_ok=true
-        logc "✓ Proxy confirmado activo en UDP :53"
-    elif ss -ulnp 2>/dev/null | grep -q ':53$'; then
-        _proxy_ok=true
-        logc "✓ Proxy confirmado activo en UDP :53"
+        logc "✓ Proxy UDP :53 activo (PID=$_pid)"
     else
-        logc "AVISO: No se detectó proceso en UDP :53 — verificar manualmente"
-        logc "  Comando: ss -ulnp | grep ':53'"
+        logc "AVISO: proxy no detectado en UDP :53"
     fi
 
-    # Verificación adicional con dig (informativa, no concluyente)
+    # 9. NAT REDIRECT — captura TODO el DNS a nivel kernel
+    # Esto hace que resolv.conf sea irrelevante: aunque NM lo cambie a 8.8.8.8,
+    # los paquetes UDP/TCP al puerto 53 son capturados antes de salir.
+    # Anti-loop: el proxy marca sus upstream queries con 0x1CA3 via SO_MARK.
+    # Iptables devuelve esos paquetes marcados sin capturarlos (RETURN).
+    cmd iptables -t nat -A OUTPUT -p udp --dport 53 -m mark --mark 0x1CA3 -j RETURN
+    cmd iptables -t nat -A OUTPUT -p tcp --dport 53 -m mark --mark 0x1CA3 -j RETURN
+    cmd iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 53
+    cmd iptables -t nat -A OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports 53
+    # Para clientes LAN que pasan por este Kali como gateway
+    cmd iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53
+    cmd iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 53
+    logc "NAT REDIRECT :53 activo (mark=0x1CA3 exento de loop)"
+
+    # Verificar con dig que NXDOMAIN funciona
     local _test
     _test=$(dig +short +time=2 youtube.com @127.0.0.1 2>/dev/null | head -1 || true)
-    if [[ -z "$_test" && "$_proxy_ok" == "true" ]]; then
-        logc "✓ DNS: youtube.com → NXDOMAIN (upstream: $_up)"
-    elif [[ -n "$_test" ]]; then
-        logc "AVISO: youtube.com resolvio a '$_test'"
+    if [[ -z "$_test" ]]; then
+        logc "✓ DNS: youtube.com → NXDOMAIN | upstream=$_up"
+    else
+        logc "AVISO: youtube.com resolvio '$_test'"
     fi
 
-    # ── 9. Bloquear IPs de servidores DoH — Firefox los tiene hardcodeados ──────
-    # IPv4 DoH IPs (Cloudflare, Google, Quad9)
+    # 10. Bloquear IPs DoH hardcodeadas en Firefox
     for _doh in 1.1.1.1 1.0.0.1 104.16.248.249 104.16.249.249 \
                 8.8.8.8 8.8.4.4 9.9.9.9 9.9.9.10; do
         cmd iptables -A PM_WEBBLOCK -p tcp --dport 443 -d "$_doh" -j PM_REJECT
         cmd iptables -A PM_WEBBLOCK -p udp --dport 443 -d "$_doh" -j PM_REJECT
     done
-    # IPv6 DoH IPs
     for _doh6 in 2606:4700:4700::1111 2606:4700:4700::1001 \
                  2001:4860:4860::8888 2001:4860:4860::8844; do
         ip6tables -A PM_WEBBLOCK -p tcp --dport 443 -d "$_doh6" -j REJECT 2>/dev/null || true
         ip6tables -A PM_WEBBLOCK -p udp --dport 443 -d "$_doh6" -j REJECT 2>/dev/null || true
     done
 
-    # ── 10. Matar Firefox + limpiar TODO el caché ────────────────────────────────
+    # 11. Flush nscd si está corriendo (cache DNS a nivel libc, ignora resolv.conf)
+    if command -v nscd &>/dev/null; then
+        nscd -i hosts 2>/dev/null || true
+        logc "nscd: cache de hosts invalidado"
+    fi
+
+    # 12. Matar Firefox + limpiar TODO el caché
     pkill -9 -f "firefox" 2>/dev/null || true
     local _ff_tries=0
     while (( _ff_tries++ < 20 )) && pgrep -f "firefox" >/dev/null 2>&1; do
@@ -1071,22 +1118,27 @@ setup_dns_proxy() {
         sleep 0.3
     done
 
-    # HTTP cache en disco — borrado directo, más confiable que find -exec
-    rm -rf /root/.cache/mozilla/firefox/*/cache2           2>/dev/null || true
-    rm -rf /home/*/.cache/mozilla/firefox/*/cache2         2>/dev/null || true
+    # HTTP cache (cache2/) — rutas directas + snap por si Firefox está como snap
+    rm -rf /root/.cache/mozilla/firefox/*/cache2                          2>/dev/null || true
+    rm -rf /home/*/.cache/mozilla/firefox/*/cache2                        2>/dev/null || true
+    rm -rf /root/snap/firefox/common/.cache/mozilla/firefox/*/cache2      2>/dev/null || true
+    rm -rf /home/*/snap/firefox/common/.cache/mozilla/firefox/*/cache2    2>/dev/null || true
 
-    # Sessionstore — evita que Firefox reabra pestaña bloqueada
+    # Sessionstore
     local _prof
-    for _prof in /root/.mozilla/firefox/*.default* \
-                 /root/.mozilla/firefox/*.default-esr* \
-                 /home/*/.mozilla/firefox/*.default* \
-                 /home/*/.mozilla/firefox/*.default-esr*; do
+    for _prof in \
+        /root/.mozilla/firefox/*.default* \
+        /root/.mozilla/firefox/*.default-esr* \
+        /home/*/.mozilla/firefox/*.default* \
+        /home/*/.mozilla/firefox/*.default-esr* \
+        /root/snap/firefox/common/.mozilla/firefox/*.default* \
+        /home/*/snap/firefox/common/.mozilla/firefox/*.default*; do
         [[ -d "$_prof" ]] || continue
         rm -f  "$_prof/sessionstore.jsonlz4" 2>/dev/null || true
         rm -rf "$_prof/sessionstore-backups" 2>/dev/null || true
     done
 
-    logc "DNS proxy PID=$_pid | port=53 | upstream=$_up | NM dns=none"
+    logc "Setup completo | proxy PID=$_pid | NAT REDIRECT activo | upstream=$_up"
 }
 
 teardown_dns_proxy() {
@@ -1094,22 +1146,27 @@ teardown_dns_proxy() {
 
     # Matar proxy
     if [[ -f "$DNS_PROXY_PID_FILE" ]]; then
-        local _pid
-        _pid=$(cat "$DNS_PROXY_PID_FILE")
+        local _pid; _pid=$(cat "$DNS_PROXY_PID_FILE")
         cmd kill "$_pid" 2>/dev/null || true
         rm -f "$DNS_PROXY_PID_FILE"
     fi
     pkill -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
-    rm -f "$DNS_PROXY_SCRIPT" 2>/dev/null || true
+    rm -f "$DNS_PROXY_SCRIPT"    2>/dev/null || true
 
-    # Quitar inmutable antes de tocar resolv.conf
+    # Limpiar NAT REDIRECT (las limpias también vienen de _flush_chains, pero por si acaso)
+    iptables -t nat -D OUTPUT    -p udp --dport 53 -m mark --mark 0x1CA3 -j RETURN  2>/dev/null || true
+    iptables -t nat -D OUTPUT    -p tcp --dport 53 -m mark --mark 0x1CA3 -j RETURN  2>/dev/null || true
+    iptables -t nat -D OUTPUT    -p udp --dport 53 -j REDIRECT --to-ports 53        2>/dev/null || true
+    iptables -t nat -D OUTPUT    -p tcp --dport 53 -j REDIRECT --to-ports 53        2>/dev/null || true
+    iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53      2>/dev/null || true
+    iptables -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 53      2>/dev/null || true
+
+    # Quitar inmutable antes de restaurar resolv.conf
     chattr -i /etc/resolv.conf 2>/dev/null || true
-
-    # Restaurar /etc/resolv.conf
     rm -f /etc/resolv.conf 2>/dev/null || true
+
     if [[ -f /var/run/mfirewall-resolv-symlink ]]; then
-        local _tgt
-        _tgt=$(cat /var/run/mfirewall-resolv-symlink)
+        local _tgt; _tgt=$(cat /var/run/mfirewall-resolv-symlink)
         ln -sf "$_tgt" /etc/resolv.conf 2>/dev/null || true
         rm -f /var/run/mfirewall-resolv-symlink
         logc "resolv.conf: symlink restaurado → $_tgt"
@@ -1117,19 +1174,18 @@ teardown_dns_proxy() {
         mv /etc/resolv.conf.mfirewall_bak /etc/resolv.conf
         logc "resolv.conf: backup restaurado"
     else
-        # Fallback mínimo
         printf 'nameserver 8.8.8.8\nnameserver 8.8.4.4\n' > /etc/resolv.conf
         logc "resolv.conf: fallback a 8.8.8.8"
     fi
 
-    # Restaurar NetworkManager DNS management y systemd-resolved
+    # Restaurar NM y systemd-resolved
     local _nm_conf="/etc/NetworkManager/conf.d/99-mfirewall-dns.conf"
     if [[ -f "$_nm_conf" ]]; then
         rm -f "$_nm_conf"
         cmd systemctl reload NetworkManager 2>/dev/null || \
             cmd systemctl restart NetworkManager 2>/dev/null || true
         sleep 0.3
-        logc "NetworkManager: dns=none eliminado, DNS management restaurado"
+        logc "NetworkManager: dns management restaurado"
     fi
     cmd systemctl start systemd-resolved 2>/dev/null || true
 
