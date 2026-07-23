@@ -1893,11 +1893,25 @@ menu_mac() {
                 if [[ -z "$MAC_BLOCKS_STR" ]]; then
                     printf '\n  \e[33mNo hay MACs para eliminar.\e[0m\n'; sleep 1; continue
                 fi
-                printf '\n  Copia la MAC exactamente como aparece arriba:\n\n'
-                read -rp "  MAC a eliminar: " mac
-                MAC_BLOCKS_STR=$(tr ',' '\n' <<< "$MAC_BLOCKS_STR" \
-                    | grep -vi "^${mac}$" | tr '\n' ',' | sed 's/,$//')
-                save_config; printf '  \e[38;5;46m✓ Eliminada.\e[0m\n'; sleep 0.8
+                clear
+                printf '\n  \e[1mEliminar MAC — elige el número:\e[0m\n\n'
+                IFS=',' read -ra _del_macs <<< "$MAC_BLOCKS_STR"
+                local _di=1
+                for _dm in "${_del_macs[@]}"; do
+                    [[ -z "$_dm" ]] && continue
+                    printf '  \e[38;5;196m%d)\e[0m  %s\n' "$_di" "$_dm"
+                    (( _di++ ))
+                done
+                printf '\n'
+                read -rp "  Número (0 para cancelar): " _dsel
+                if [[ "$_dsel" =~ ^[0-9]+$ && "$_dsel" -gt 0 && "$_dsel" -lt "$_di" ]]; then
+                    local _target_mac="${_del_macs[$(( _dsel - 1 ))]}"
+                    MAC_BLOCKS_STR=$(tr ',' '\n' <<< "$MAC_BLOCKS_STR" \
+                        | grep -vi "^${_target_mac}$" | tr '\n' ',' | sed 's/,$//')
+                    save_config
+                    printf '  \e[38;5;46m✓\e[0m  Eliminada: %s\n' "$_target_mac"
+                    sleep 0.8
+                fi
                 ;;
             0) break ;;
         esac
@@ -1979,11 +1993,27 @@ menu_connlimit() {
                 if [[ -z "$CONN_LIMITS_STR" ]]; then
                     printf '\n  \e[33mNo hay límites para eliminar.\e[0m\n'; sleep 1; continue
                 fi
-                printf '\n  Entrada a eliminar (proto:puerto:max o proto:puerto:max:IP):\n'
-                read -rp "  Entrada: " entry
-                CONN_LIMITS_STR=$(tr ',' '\n' <<< "$CONN_LIMITS_STR" \
-                    | grep -v "^${entry}" | tr '\n' ',' | sed 's/,$//')
-                save_config; printf '  \e[38;5;46m✓ Eliminado.\e[0m\n'; sleep 0.8
+                clear
+                printf '\n  \e[1mEliminar límite — elige el número:\e[0m\n\n'
+                IFS=',' read -ra _del_limits <<< "$CONN_LIMITS_STR"
+                local _li=1
+                for _dl in "${_del_limits[@]}"; do
+                    [[ -z "$_dl" ]] && continue
+                    IFS=':' read -r _dlp _dlport _dlmax _dlip <<< "$_dl"
+                    printf '  \e[38;5;196m%d)\e[0m  %-4s  puerto %-6s  max %-4s  IP: %s\n' \
+                        "$_li" "$_dlp" "$_dlport" "$_dlmax" "${_dlip:-todos}"
+                    (( _li++ ))
+                done
+                printf '\n'
+                read -rp "  Número (0 para cancelar): " _lsel
+                if [[ "$_lsel" =~ ^[0-9]+$ && "$_lsel" -gt 0 && "$_lsel" -lt "$_li" ]]; then
+                    local _target_limit="${_del_limits[$(( _lsel - 1 ))]}"
+                    CONN_LIMITS_STR=$(tr ',' '\n' <<< "$CONN_LIMITS_STR" \
+                        | grep -v "^${_target_limit}$" | tr '\n' ',' | sed 's/,$//')
+                    save_config
+                    printf '  \e[38;5;46m✓\e[0m  Eliminado: %s\n' "$_target_limit"
+                    sleep 0.8
+                fi
                 ;;
             0) break ;;
         esac
