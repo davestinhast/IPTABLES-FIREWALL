@@ -2028,8 +2028,8 @@ menu_mac() {
             local i=1
             for mac in "${_macs[@]}"; do
                 [[ -z "$mac" ]] && continue
-                printf "  \e[38;5;27m│\e[0m  \e[38;5;196m✗\e[0m  \e[38;5;51m%s\e[0m\n" "$mac"
-                printf "  \e[38;5;27m│\e[0m      \e[38;5;240m→ iptables FORWARD -m mac --mac-source %s -j REJECT\e[0m\n" "$mac"
+                printf "  \e[38;5;27m│\e[0m  \e[38;5;196m[BLOQUEADA]\e[0m  \e[38;5;51m%s\e[0m\n" "$mac"
+                printf "  \e[38;5;27m│\e[0m               \e[38;5;240miptables -m mac --mac-source %s -j REJECT\e[0m\n" "$mac"
                 ((i++))
             done
         else
