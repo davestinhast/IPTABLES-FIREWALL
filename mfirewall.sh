@@ -1897,29 +1897,84 @@ wizard_activate() {
 # =============================================================================
 # SUBMENÚS REDISEÑADOS
 # =============================================================================
+autodetect_interfaces() {
+    # WAN = interfaz que tiene la ruta default hacia internet
+    local _wan
+    _wan=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
+    # LAN = primera interfaz que no sea lo ni WAN
+    local _lan
+    _lan=$(ip -o link show 2>/dev/null \
+        | awk -F': ' '{print $2}' \
+        | grep -v '^lo$' \
+        | grep -v "^${_wan}$" \
+        | head -1)
+    [[ -n "$_wan" ]] && WAN_IFACE="$_wan"
+    [[ -n "$_lan" ]] && LAN_IFACE="$_lan"
+}
+
 menu_interfaces() {
-    clear
-    printf '\n'
-    printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
-    printf '  \e[38;5;27m│\e[0m  \e[1mInterfaces de Red  (WAN / LAN)\e[0m\n'
-    printf '  \e[38;5;27m│\e[0m  \e[2mWAN = tarjeta conectada a internet\e[0m\n'
-    printf '  \e[38;5;27m│\e[0m  \e[2mLAN = tarjeta conectada a la red local de clientes\e[0m\n'
-    printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
-    printf '  \e[38;5;27m│\e[0m  \e[2mInterfaces detectadas en este sistema:\e[0m\n'
-    ip -o link show 2>/dev/null \
-        | awk -F': ' '{printf "  \033[38;5;27m│\033[0m     \033[38;5;51m%-14s\033[0m\n", $2}' \
-        | grep -v "lo$"
-    printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
-    printf "  \e[38;5;27m│\e[0m  WAN actual:  \e[38;5;46m%s\e[0m\n" "${WAN_IFACE:-no configurada}"
-    printf "  \e[38;5;27m│\e[0m  LAN actual:  \e[38;5;46m%s\e[0m\n" "${LAN_IFACE:-no configurada}"
-    printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
-    read -rp "  Nueva WAN (Enter = mantener '${WAN_IFACE:-vacío}'): " w
-    read -rp "  Nueva LAN (Enter = mantener '${LAN_IFACE:-vacío}'): " l
-    [[ -n "$w" ]] && WAN_IFACE="$w"
-    [[ -n "$l" ]] && LAN_IFACE="$l"
-    save_config
-    printf '\n  \e[38;5;46m✓ Guardado  →  WAN: %s  |  LAN: %s\e[0m\n' \
-        "${WAN_IFACE:-—}" "${LAN_IFACE:-—}"
+    # Auto-detectar si están vacías
+    if [[ -z "$WAN_IFACE" && -z "$LAN_IFACE" ]]; then
+        autodetect_interfaces
+        save_config
+        local _auto=true
+    fi
+
+    while true; do
+        clear
+        printf '\n'
+        printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mPASO 1 — Interfaces de Red  (WAN / LAN)\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;226m¿Para qué sirve?\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mEl firewall necesita saber cuál tarjeta de red es\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2minternet (WAN) y cuál conecta a los clientes (LAN).\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mSi tienes una sola tarjeta (eth0), será WAN y LAN.\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mWAN = tarjeta conectada a internet\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mLAN = tarjeta conectada a la red local de clientes\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mInterfaces detectadas en este sistema:\e[0m\n'
+        ip -o link show 2>/dev/null \
+            | awk -F': ' '{printf "  \033[38;5;27m│\033[0m     \033[38;5;51m%-14s\033[0m\n", $2}' \
+            | grep -v "lo$"
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        if [[ "${_auto}" == "true" ]]; then
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;46m✓ Auto-detectado\e[0m\n'
+        fi
+        printf "  \e[38;5;27m│\e[0m  WAN:  \e[1m\e[38;5;46m%-20s\e[0m  \e[2m(internet)\e[0m\n"  "${WAN_IFACE:-no detectada}"
+        printf "  \e[38;5;27m│\e[0m  LAN:  \e[1m\e[38;5;46m%-20s\e[0m  \e[2m(clientes)\e[0m\n" "${LAN_IFACE:-no detectada}"
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;46ma)\e[0m  Re-detectar automáticamente\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45mm)\e[0m  Cambiar manualmente\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Volver al menú principal\n'
+        printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
+
+        read -rp "  Opción: " _opt
+        case "$_opt" in
+            a|A)
+                autodetect_interfaces
+                save_config
+                _auto=true
+                printf '\n  \e[38;5;46m✓ Re-detectado  →  WAN: %s  |  LAN: %s\e[0m\n' \
+                    "${WAN_IFACE:-—}" "${LAN_IFACE:-—}"
+                sleep 1
+                ;;
+            m|M)
+                _auto=false
+                printf '\n'
+                read -rp "  Nueva WAN (Enter = mantener '${WAN_IFACE:-vacío}'): " w
+                read -rp "  Nueva LAN (Enter = mantener '${LAN_IFACE:-vacío}'): " l
+                [[ -n "$w" ]] && WAN_IFACE="$w"
+                [[ -n "$l" ]] && LAN_IFACE="$l"
+                save_config
+                printf '\n  \e[38;5;46m✓ Guardado  →  WAN: %s  |  LAN: %s\e[0m\n' \
+                    "${WAN_IFACE:-—}" "${LAN_IFACE:-—}"
+                sleep 1
+                ;;
+            0) return ;;
+        esac
+    done
 }
 
 menu_mac() {
@@ -2345,6 +2400,19 @@ main_menu() {
         boot_spinner &
         local _bpid=$!
         load_config
+        # Validar que WAN/LAN guardadas sean interfaces reales; si no, limpiar y auto-detectar
+        local _ifaces
+        _ifaces=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}')
+        if [[ -n "$WAN_IFACE" ]] && ! grep -qw "$WAN_IFACE" <<< "$_ifaces"; then
+            WAN_IFACE=""
+        fi
+        if [[ -n "$LAN_IFACE" ]] && ! grep -qw "$LAN_IFACE" <<< "$_ifaces"; then
+            LAN_IFACE=""
+        fi
+        if [[ -z "$WAN_IFACE" || -z "$LAN_IFACE" ]]; then
+            autodetect_interfaces
+            save_config
+        fi
         sleep 0.6
         kill "$_bpid" 2>/dev/null; wait "$_bpid" 2>/dev/null
         printf '\r%*s\r' "$(tput cols)" ""
