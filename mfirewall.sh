@@ -966,14 +966,24 @@ apply_conn_limits() {
     [[ -z "$CONN_LIMITS_STR" ]] && return
     logsec "Connection Limits"
     IFS=',' read -ra _limits <<< "$CONN_LIMITS_STR"
-    local entry proto port max
+    local entry proto port max ip
     for entry in "${_limits[@]}"; do
         [[ -z "$entry" ]] && continue
-        IFS=':' read -r proto port max <<< "$entry"
-        cmd iptables -A PM_CONNLIMIT -p "$proto" --dport "$port" \
-            -m connlimit --connlimit-above "$max" --connlimit-mask 32 \
-            -j PM_REJECT
-        logc "Límite: $proto/$port max=$max"
+        # Formato: proto:port:max   O   proto:port:max:IP
+        IFS=':' read -r proto port max ip <<< "$entry"
+        if [[ -n "$ip" && "$ip" != "*" ]]; then
+            # Limitar solo esa IP especifica (viene del scanner)
+            cmd iptables -A PM_CONNLIMIT -s "$ip" -p "$proto" --dport "$port" \
+                -m connlimit --connlimit-above "$max" --connlimit-mask 32 \
+                -j PM_REJECT
+            logc "Límite: $proto/$port max=$max → solo $ip"
+        else
+            # Sin IP especifica: limita a TODAS las IPs que pasan por FORWARD
+            cmd iptables -A PM_CONNLIMIT -p "$proto" --dport "$port" \
+                -m connlimit --connlimit-above "$max" --connlimit-mask 32 \
+                -j PM_REJECT
+            logc "Límite: $proto/$port max=$max → todos los clientes"
+        fi
     done
 }
 
@@ -1899,53 +1909,69 @@ menu_connlimit() {
         clear
         printf '\n'
         printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[1mLímite de Conexiones Simultáneas\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[2mCada IP cliente no puede tener más de N conexiones abiertas\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[2mal mismo tiempo hacia un puerto específico.\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mLímite de Conexiones Simultáneas                         \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mMax conexiones por IP hacia un puerto. Kernel las cuenta. \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  %-6s  %-6s  %-5s  %-16s  %-10s \e[38;5;27m│\e[0m\n' \
+            "PROTO" "PUERTO" "MAX" "IP OBJETIVO" "REGLA"
         printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
 
         if [[ -n "$CONN_LIMITS_STR" ]]; then
             IFS=',' read -ra _limits <<< "$CONN_LIMITS_STR"
             for entry in "${_limits[@]}"; do
                 [[ -z "$entry" ]] && continue
-                IFS=':' read -r _p _port _max <<< "$entry"
-                printf "  \e[38;5;27m│\e[0m  \e[38;5;214m●\e[0m  \e[38;5;51m%-4s\e[0m  puerto \e[38;5;51m%-6s\e[0m  máx \e[1m%s\e[0m conexiones por IP\n" \
-                    "$_p" "$_port" "$_max"
-                printf "  \e[38;5;27m│\e[0m      \e[38;5;240m→ --connlimit-above %s --connlimit-mask 32 -j REJECT\e[0m\n" "$_max"
+                IFS=':' read -r _p _port _max _ip <<< "$entry"
+                local _target="${_ip:-todos}"
+                printf "  \e[38;5;27m│\e[0m  \e[38;5;214m●\e[0m \e[38;5;51m%-5s\e[0m  %-6s  \e[1m%-5s\e[0m  \e[38;5;214m%-16s\e[0m \e[38;5;27m│\e[0m\n" \
+                    "$_p" "$_port" "$_max" "$_target"
+                printf "  \e[38;5;27m│\e[0m    \e[38;5;240m-m connlimit --connlimit-above %-3s --connlimit-mask 32 \e[38;5;27m│\e[0m\n" "$_max"
             done
         else
-            printf '  \e[38;5;27m│\e[0m  \e[38;5;240m  Sin límites configurados. Agrega uno con [a].\e[0m\n'
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;240m  Sin límites. [a] para agregar.                          \e[38;5;27m│\e[0m\n'
         fi
 
         printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;46ma)\e[0m  Agregar   \e[38;5;196md)\e[0m  Eliminar   \e[38;5;240m0)\e[0m  Volver\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;46ma)\e[0m Agregar  \e[38;5;196md)\e[0m Eliminar  \e[38;5;240m0)\e[0m Volver              \e[38;5;27m│\e[0m\n'
         printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
 
         read -rp "  Opción: " opt
         case "$opt" in
             a|A)
-                printf '\n  \e[1mAgregar límite de conexiones\e[0m\n\n'
-                printf '  \e[38;5;27m──\e[0m  \e[1mPaso 1 de 3\e[0m  Protocolo\n'
-                printf '  \e[38;5;240m     tcp = HTTP, HTTPS, SSH\e[0m\n'
-                printf '  \e[38;5;240m     udp = DNS, streaming, juegos\e[0m\n'
-                read -rp "  Protocolo [tcp/udp]: " proto
+                clear
+                printf '\n'
+                printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+                printf '  \e[38;5;27m│\e[0m  \e[1mAgregar límite de conexiones                             \e[38;5;27m│\e[0m\n'
+                printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
 
-                printf '\n  \e[38;5;27m──\e[0m  \e[1mPaso 2 de 3\e[0m  Puerto de destino\n'
-                printf '  \e[38;5;240m     Comunes: 80 (HTTP)  443 (HTTPS)  22 (SSH)\e[0m\n'
+                printf '  \e[38;5;51m[1]\e[0m  Protocolo\n'
+                printf '  \e[38;5;240m      tcp → HTTP, HTTPS, SSH\e[0m\n'
+                printf '  \e[38;5;240m      udp → DNS, streaming\e[0m\n'
+                read -rp "  tcp/udp: " proto
+
+                printf '\n  \e[38;5;51m[2]\e[0m  Puerto de destino\n'
+                printf '  \e[38;5;240m      80=HTTP  443=HTTPS  22=SSH  53=DNS\e[0m\n'
                 read -rp "  Puerto: " port
 
-                printf '\n  \e[38;5;27m──\e[0m  \e[1mPaso 3 de 3\e[0m  Máximo de conexiones simultáneas\n'
-                printf '  \e[38;5;240m     Sugerido: 50 para HTTP/HTTPS · 10 para SSH\e[0m\n'
+                printf '\n  \e[38;5;51m[3]\e[0m  Máximo de conexiones simultáneas por IP\n'
+                printf '  \e[38;5;240m      Sugerido: 50 HTTPS · 10 SSH · 5 para restringir fuerte\e[0m\n'
                 read -rp "  Máximo: " max
 
+                printf '\n  \e[38;5;51m[4]\e[0m  IP objetivo (Enter = todos los equipos de la red)\n'
+                printf '  \e[38;5;240m      Deja vacío para limitar a TODOS los clientes.\e[0m\n'
+                printf '  \e[38;5;240m      Escribe una IP para limitar solo ese equipo.\e[0m\n'
+                printf '  \e[38;5;240m      Usa opcion 9 (scanner) para ver IPs disponibles.\e[0m\n'
+                read -rp "  IP (o Enter para todos): " target_ip
+
                 if [[ "$proto" =~ ^(tcp|udp)$ && "$port" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ ]]; then
-                    CONN_LIMITS_STR="${CONN_LIMITS_STR:+${CONN_LIMITS_STR},}${proto}:${port}:${max}"
+                    local _entry="${proto}:${port}:${max}"
+                    [[ -n "$target_ip" ]] && _entry="${_entry}:${target_ip}"
+                    CONN_LIMITS_STR="${CONN_LIMITS_STR:+${CONN_LIMITS_STR},}${_entry}"
                     save_config
-                    printf '\n  \e[38;5;46m✓ Límite guardado:\e[0m  %s puerto %s  máx %s conexiones\n' \
-                        "$proto" "$port" "$max"
-                    sleep 1.5
+                    printf '\n  \e[38;5;46m✓ Guardado:\e[0m  %s puerto %s  máx %s  destino: %s\n' \
+                        "$proto" "$port" "$max" "${target_ip:-todos los clientes}"
+                    sleep 1.8
                 else
-                    printf '\n  \e[31m✗ Datos inválidos.\e[0m  Protocolo: tcp o udp · Puerto y máximo: solo números.\n'
+                    printf '\n  \e[31m✗ Error:\e[0m protocolo tcp/udp, puerto y máximo deben ser números.\n'
                     sleep 2
                 fi
                 ;;
@@ -1953,11 +1979,10 @@ menu_connlimit() {
                 if [[ -z "$CONN_LIMITS_STR" ]]; then
                     printf '\n  \e[33mNo hay límites para eliminar.\e[0m\n'; sleep 1; continue
                 fi
-                printf '\n  Ingresa la entrada a eliminar (proto:puerto:max):\n'
-                printf '  \e[38;5;240m  Ejemplo: tcp:443:50\e[0m\n\n'
+                printf '\n  Entrada a eliminar (proto:puerto:max o proto:puerto:max:IP):\n'
                 read -rp "  Entrada: " entry
                 CONN_LIMITS_STR=$(tr ',' '\n' <<< "$CONN_LIMITS_STR" \
-                    | grep -v "^${entry}$" | tr '\n' ',' | sed 's/,$//')
+                    | grep -v "^${entry}" | tr '\n' ',' | sed 's/,$//')
                 save_config; printf '  \e[38;5;46m✓ Eliminado.\e[0m\n'; sleep 0.8
                 ;;
             0) break ;;
@@ -2047,44 +2072,87 @@ menu_scan_network() {
         fi
 
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45mr)\e[0m  Reescanear\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Volver al menú\n'
+        printf '  \e[38;5;27m│\e[0m  Ingresa el numero del equipo para ver opciones de bloqueo   \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45mr)\e[0m Reescanear   \e[38;5;240m0)\e[0m Volver                              \e[38;5;27m│\e[0m\n'
         printf '  \e[38;5;27m╰──────────────────────────────────────────────────────────────╯\e[0m\n'
         printf '\n'
 
-        read -rp "  Numero para bloquear MAC, [r] reescanear, [0] volver: " _sel
+        read -rp "  Selecciona equipo [numero / r / 0]: " _sel
 
         case "$_sel" in
-            r|R) continue ;;
+            r|R) unset _devs; continue ;;
             0)   return ;;
-            ''|*[!0-9]*)
-                [[ "$_sel" == "r" || "$_sel" == "R" || "$_sel" == "0" ]] && continue
-                printf '  \e[33m[!]\e[0m Opcion invalida.\n'; sleep 0.8
-                ;;
+            *[!0-9]*)
+                printf '  \e[33m[!]\e[0m Opcion invalida.\n'; sleep 0.8 ;;
             *)
                 local _idx="$_sel"
                 if (( _idx < ${#_devs[@]} )); then
                     IFS='|' read -r _bip _bmac _bven <<< "${_devs[$_idx]}"
-                    # Agregar a MAC_BLOCKS_STR si no esta ya
-                    local _already=false
-                    IFS=',' read -ra _cur <<< "$MAC_BLOCKS_STR"
-                    for _m in "${_cur[@]}"; do
-                        [[ "${_m,,}" == "${_bmac,,}" ]] && _already=true && break
-                    done
-                    if [[ "$_already" == true ]]; then
-                        printf '\n  \e[33m[!]\e[0m  MAC %s ya esta en la lista.\n' "$_bmac"
-                    else
-                        if [[ -z "$MAC_BLOCKS_STR" ]]; then
-                            MAC_BLOCKS_STR="$_bmac"
+
+                    # Submenú de accion para el equipo seleccionado
+                    clear
+                    printf '\n'
+                    printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
+                    printf '  \e[38;5;27m│\e[0m  Equipo seleccionado                                          \e[38;5;27m│\e[0m\n'
+                    printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+                    printf "  \e[38;5;27m│\e[0m  IP:   \e[38;5;51m%-52s\e[38;5;27m│\e[0m\n" "$_bip"
+                    printf "  \e[38;5;27m│\e[0m  MAC:  \e[38;5;214m%-52s\e[38;5;27m│\e[0m\n" "$_bmac"
+                    printf "  \e[38;5;27m│\e[0m  ID:   \e[38;5;240m%-52s\e[38;5;27m│\e[0m\n" "$_bven"
+                    printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+                    printf '  \e[38;5;27m│\e[0m  Que quieres hacer con este equipo?                          \e[38;5;27m│\e[0m\n'
+                    printf '  \e[38;5;27m│\e[0m                                                              \e[38;5;27m│\e[0m\n'
+                    printf '  \e[38;5;27m│\e[0m  \e[38;5;196m1)\e[0m  Bloquear MAC (corta TODO su trafico)                  \e[38;5;27m│\e[0m\n'
+                    printf '  \e[38;5;27m│\e[0m  \e[38;5;214m2)\e[0m  Limitar conexiones (max N por puerto)                  \e[38;5;27m│\e[0m\n'
+                    printf '  \e[38;5;27m│\e[0m  \e[38;5;46m3)\e[0m  Ambos (bloquear MAC + limitar conexiones)              \e[38;5;27m│\e[0m\n'
+                    printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Cancelar                                              \e[38;5;27m│\e[0m\n'
+                    printf '  \e[38;5;27m╰──────────────────────────────────────────────────────────────╯\e[0m\n\n'
+                    read -rp "  Accion: " _action
+
+                    # — Bloqueo MAC —
+                    _do_mac=false
+                    _do_limit=false
+                    case "$_action" in
+                        1) _do_mac=true ;;
+                        2) _do_limit=true ;;
+                        3) _do_mac=true; _do_limit=true ;;
+                        0) unset _devs; continue ;;
+                    esac
+
+                    if [[ "$_do_mac" == true ]]; then
+                        local _mac_exists=false
+                        IFS=',' read -ra _cur <<< "$MAC_BLOCKS_STR"
+                        for _m in "${_cur[@]}"; do
+                            [[ "${_m,,}" == "${_bmac,,}" ]] && _mac_exists=true && break
+                        done
+                        if [[ "$_mac_exists" == true ]]; then
+                            printf '\n  \e[33m[!]\e[0m  MAC %s ya estaba bloqueada.\n' "$_bmac"
                         else
-                            MAC_BLOCKS_STR="${MAC_BLOCKS_STR},${_bmac}"
+                            MAC_BLOCKS_STR="${MAC_BLOCKS_STR:+${MAC_BLOCKS_STR},}${_bmac}"
+                            save_config
+                            printf '\n  \e[38;5;46m[+]\e[0m  MAC \e[1m%s\e[0m bloqueada.\n' "$_bmac"
                         fi
-                        save_config
-                        printf '\n  \e[38;5;46m[+]\e[0m  MAC \e[1m%s\e[0m (%s) agregada al bloqueo.\n' \
-                            "$_bmac" "$_bip"
-                        printf '  \e[2m    Activa el firewall (opcion 1) para aplicar el bloqueo.\e[0m\n'
                     fi
-                    sleep 1.8
+
+                    # — Limite de conexiones para esa IP —
+                    if [[ "$_do_limit" == true ]]; then
+                        printf '\n  \e[38;5;51m[Limite]\e[0m  Protocolo (tcp/udp): '
+                        read -r _lp
+                        printf '  \e[38;5;51m[Limite]\e[0m  Puerto de destino:   '
+                        read -r _lport
+                        printf '  \e[38;5;51m[Limite]\e[0m  Max conexiones:      '
+                        read -r _lmax
+                        if [[ "$_lp" =~ ^(tcp|udp)$ && "$_lport" =~ ^[0-9]+$ && "$_lmax" =~ ^[0-9]+$ ]]; then
+                            CONN_LIMITS_STR="${CONN_LIMITS_STR:+${CONN_LIMITS_STR},}${_lp}:${_lport}:${_lmax}:${_bip}"
+                            save_config
+                            printf '  \e[38;5;46m[+]\e[0m  Limite %s/%s max=%s aplicado solo a %s\n' \
+                                "$_lp" "$_lport" "$_lmax" "$_bip"
+                        else
+                            printf '  \e[31m✗\e[0m  Datos invalidos.\n'
+                        fi
+                    fi
+
+                    printf '\n  \e[2mActiva el firewall (opcion 1) para aplicar los cambios.\e[0m\n'
+                    sleep 2
                 else
                     printf '  \e[33m[!]\e[0m Numero fuera de rango.\n'; sleep 0.8
                 fi
