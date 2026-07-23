@@ -615,122 +615,6 @@ setup_base_chains() {
     logc "Cadenas IPv4+IPv6 listas — ESTABLISHED/RELATED activo (servidor->cliente permitido)"
 }
 
-# =============================================================================
-# PASO 8 — Bloqueo DNS a nivel kernel (wire protocol, puerto 53)
-#   Bloquea la query DNS antes de que el browser reciba la IP del dominio.
-#   Sin IP el browser no puede conectar, aunque eluda /etc/hosts o el proxy.
-#   El nombre del dominio en DNS wire format se codifica como longitud+etiqueta:
-#   "youtube.com" → \x07youtube\x03com (0x07=7 letras, 0x03=3 letras)
-#   iptables busca esa secuencia de bytes en el payload UDP/TCP del puerto 53.
-# Esto atrapa browsers que bypassean /etc/hosts pero no pueden bypassear el kernel.
-# =============================================================================
-apply_dns_block() {
-    logsec "DNS hex-string blocking (port 53)"
-    # Patrones hex para cada sitio (longitud en hex + label ASCII)
-    local _dns_rules=()
-
-    if [[ "$BLOCK_FACEBOOK" == "true" ]]; then
-        _dns_rules+=("|08|facebook|03|com")
-        _dns_rules+=("|05|fbcdn|03|net")
-        _dns_rules+=("|09|messenger|03|com")
-        _dns_rules+=("|09|instagram|03|com")
-    fi
-    if [[ "$BLOCK_YOUTUBE" == "true" ]]; then
-        _dns_rules+=("|07|youtube|03|com")
-        _dns_rules+=("|0b|googlevideo|03|com")
-        _dns_rules+=("|05|ytimg|03|com")
-        _dns_rules+=("|06|youtu|02|be")
-    fi
-    if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
-        _dns_rules+=("|07|hotmail|03|com")
-        _dns_rules+=("|07|outlook|03|com")
-        _dns_rules+=("|0f|microsoftonline|03|com")
-        _dns_rules+=("|04|live|03|com")
-    fi
-
-    local _hex
-    for _hex in "${_dns_rules[@]}"; do
-        # OUTPUT: DNS del propio servidor/máquina
-        cmd iptables -A PM_WEBBLOCK -p udp --dport 53 \
-            -m string --hex-string "$_hex" --algo bm -j PM_REJECT
-        cmd iptables -A PM_WEBBLOCK -p tcp --dport 53 \
-            -m string --hex-string "$_hex" --algo bm -j PM_REJECT
-    done
-    logc "DNS blocking: ${#_dns_rules[@]} patrones en port 53"
-}
-
-# =============================================================================
-# GOOGLE/YOUTUBE IP RANGE BLOCKING — iptables con CIDR directo (-d)
-# Fuente: https://www.gstatic.com/ipranges/goog.json (Google publica sus propios rangos)
-# iptables acepta CIDR en -d nativamente: -d 74.125.0.0/16 -j PM_REJECT
-# Garantía extra: aunque Firefox bypasee DNS (DoH, cache), el paquete TCP/UDP
-# llega a iptables y es rechazado ANTES de que el servidor responda.
-# =============================================================================
-apply_goog_ranges_iptables() {
-    logsec "Bloqueando rangos IP Google/YouTube con iptables (CIDR directo)"
-
-    # Rangos IPv4 de Google/YouTube CDN (goog.json publicado por Google en gstatic.com)
-    # EXCLUIDOS: 8.8.4.0/24 y 8.8.8.0/24 — son los DNS resolvers públicos de Google,
-    # bloquearlos completamente rompería la resolución DNS del sistema.
-    # El proxy DNS ya maneja ese caso por separado.
-    local _ranges=(
-        8.34.208.0/20     8.35.192.0/20
-        23.236.48.0/20    23.251.128.0/19
-        34.0.0.0/15       34.2.0.0/16
-        34.3.0.0/23       34.3.3.0/24
-        34.4.0.0/14       34.8.0.0/13
-        34.16.0.0/12      34.32.0.0/11
-        34.64.0.0/10      34.128.0.0/10
-        35.184.0.0/13     35.192.0.0/14
-        35.196.0.0/15     35.198.0.0/16
-        35.199.0.0/17     35.200.0.0/13
-        35.208.0.0/12     35.224.0.0/12
-        35.240.0.0/13     35.252.0.0/14
-        64.15.112.0/20    64.233.160.0/19
-        66.102.0.0/20     66.249.64.0/19
-        70.32.128.0/19    72.14.192.0/18
-        74.114.24.0/21    74.125.0.0/16
-        104.154.0.0/15    104.196.0.0/14
-        107.167.160.0/19  107.178.192.0/18
-        108.59.80.0/20    108.170.192.0/18
-        108.177.0.0/17    130.211.0.0/16
-        142.250.0.0/15    146.148.0.0/17
-        162.216.148.0/22  162.222.176.0/21
-        172.110.32.0/21   172.217.0.0/16
-        172.253.0.0/16    173.194.0.0/16
-        173.255.112.0/20  192.158.28.0/22
-        192.178.0.0/15    199.36.154.0/23
-        199.36.156.0/24   199.192.112.0/22
-        199.223.232.0/21  207.175.0.0/16
-        208.65.152.0/22   208.68.108.0/22
-        208.81.188.0/22   208.117.224.0/19
-        209.85.128.0/17   216.58.192.0/19
-        216.73.80.0/20    216.239.32.0/19
-        216.252.220.0/22  200.226.0.0/16
-        207.223.160.0/20
-    )
-
-    local _r _n=0
-    for _r in "${_ranges[@]}"; do
-        cmd iptables -A PM_WEBBLOCK -d "$_r" -j PM_REJECT
-        (( _n++ ))
-    done
-
-    # IPv6 — rangos de Google AS15169 en ip6tables
-    for _r6 in \
-        2607:f8b0::/32 \
-        2404:6800::/32 \
-        2a00:1450::/32 \
-        2001:4860::/32 \
-        2800:3f0::/32  \
-        2c0f:fb50::/32 \
-        2001:4860:4860::8888/128 \
-        2001:4860:4860::8844/128; do
-        ip6tables -A PM_WEBBLOCK -d "$_r6" -j REJECT 2>/dev/null || true
-    done
-
-    logc "$_n reglas iptables CIDR bloqueando rangos Google/YouTube"
-}
 
 # =============================================================================
 # PASO 7 — Bloqueo de sitios web (PM_WEBBLOCK): capas de bloqueo
@@ -800,70 +684,6 @@ _apply_dns_site() {
     logc "${_site^} DNS: ${#_hex_rules[@]} patrones hex en port 53"
 }
 
-apply_sni_rules() {
-    logsec "SNI string-match blocking"
-    local sni_fb=("facebook.com" "fbcdn.net" "fbsbx.com" "messenger.com")
-    local sni_yt=("youtube.com" "googlevideo.com" "ytimg.com" "youtu.be" "youtube-nocookie.com")
-    local sni_hm=("hotmail.com" "outlook.com" "microsoftonline.com" "live.com")
-
-    local domain
-    if [[ "$BLOCK_FACEBOOK" == "true" ]]; then
-        for domain in "${sni_fb[@]}"; do
-            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 443 \
-                -m string --string "$domain" --algo bm -j PM_REJECT
-            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 80  \
-                -m string --string "$domain" --algo bm -j PM_REJECT
-            ip6tables -A PM_WEBBLOCK -p tcp --dport 443 \
-                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
-            ip6tables -A PM_WEBBLOCK -p tcp --dport 80  \
-                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
-        done
-        logc "Facebook SNI: ${#sni_fb[@]} dominios (IPv4+IPv6)"
-    fi
-    if [[ "$BLOCK_YOUTUBE" == "true" ]]; then
-        for domain in "${sni_yt[@]}"; do
-            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 443 \
-                -m string --string "$domain" --algo bm -j PM_REJECT
-            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 80  \
-                -m string --string "$domain" --algo bm -j PM_REJECT
-            ip6tables -A PM_WEBBLOCK -p tcp --dport 443 \
-                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
-            ip6tables -A PM_WEBBLOCK -p tcp --dport 80  \
-                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
-        done
-        # Bloqueo global QUIC/HTTP3 IPv4 + IPv6 — YouTube lo usa agresivamente
-        cmd iptables -A PM_WEBBLOCK -p udp --dport 443 -j PM_REJECT
-        ip6tables -A PM_WEBBLOCK -p udp --dport 443 -j REJECT 2>/dev/null || true
-
-        # Rangos IPv4 adicionales de YouTube CDN no capturados por ipset (Anycast)
-        cmd iptables -A PM_WEBBLOCK -d 34.107.0.0/16  -j PM_REJECT
-        cmd iptables -A PM_WEBBLOCK -d 34.98.0.0/16   -j PM_REJECT
-
-        # Rangos IPv6 de Google/YouTube CDN — Firefox los usa cuando ECH está activo
-        # network.dns.disableIPv6 en la policy de Firefox previene esto,
-        # pero estas reglas actuan como capa de respaldo
-        ip6tables -A PM_WEBBLOCK -d 2800:3f0::/32  -j REJECT 2>/dev/null || true
-        ip6tables -A PM_WEBBLOCK -d 2001:4860::/32 -j REJECT 2>/dev/null || true
-        ip6tables -A PM_WEBBLOCK -d 2607:f8b0::/32 -j REJECT 2>/dev/null || true
-        ip6tables -A PM_WEBBLOCK -d 2404:6800::/32 -j REJECT 2>/dev/null || true
-        ip6tables -A PM_WEBBLOCK -d 2a00:1450::/32 -j REJECT 2>/dev/null || true
-
-        logc "YouTube SNI: ${#sni_yt[@]} dominios + QUIC UDP 443 + CIDR IPv4/IPv6 CDN"
-    fi
-    if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
-        for domain in "${sni_hm[@]}"; do
-            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 443 \
-                -m string --string "$domain" --algo bm -j PM_REJECT
-            cmd iptables  -A PM_WEBBLOCK -p tcp --dport 80  \
-                -m string --string "$domain" --algo bm -j PM_REJECT
-            ip6tables -A PM_WEBBLOCK -p tcp --dport 443 \
-                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
-            ip6tables -A PM_WEBBLOCK -p tcp --dport 80  \
-                -m string --string "$domain" --algo bm -j REJECT 2>/dev/null || true
-        done
-        logc "Hotmail SNI: ${#sni_hm[@]} dominios (IPv4+IPv6)"
-    fi
-}
 
 # =============================================================================
 # BLOQUEADOR ANIMADO — targeting de IPs en tiempo real
@@ -1531,7 +1351,7 @@ enable_firewall() {
        "$BLOCK_HOTMAIL"  == "true" ]] && any=true
 
     if [[ "$any" == false ]]; then
-        printf '\n  \e[33m[!]\e[0m Sin sitios habilitados. Ve a \e[1mOpción 3\e[0m primero.\n'
+        printf '\n  \e[33m[!]\e[0m Sin sitios habilitados. Ve a \e[1mOpción 2\e[0m primero.\n'
         return 1
     fi
 
