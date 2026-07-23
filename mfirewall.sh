@@ -1997,10 +1997,10 @@ menu_mac() {
                         local _sdven_s="${_sdven:0:13}"
                         if [[ "$_sdip" == "$_sown_ip" ]]; then
                             printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-4s\e[0m  \e[38;5;51m%-15s\e[0m  \e[38;5;220m%-19s\e[0m  \e[38;5;240m%-13s\e[38;5;27m│\e[0m\n" \
-                                "${_si})" "$_sdip" "$_sdmac" "$_sdven_s"
+                                "$(( _si+1 )))" "$_sdip" "$_sdmac" "$_sdven_s"
                         else
                             printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-4s\e[0m  \e[38;5;51m%-15s\e[0m  \e[38;5;214m%-19s\e[0m  \e[38;5;240m%-13s\e[38;5;27m│\e[0m\n" \
-                                "${_si})" "$_sdip" "$_sdmac" "$_sdven_s"
+                                "$(( _si+1 )))" "$_sdip" "$_sdmac" "$_sdven_s"
                         fi
                         (( _si++ ))
                     done
@@ -2011,8 +2011,8 @@ menu_mac() {
                 local mac=""
                 if [[ "$_msel" == "0" ]]; then
                     unset _scan_devs; continue
-                elif [[ "$_msel" =~ ^[0-9]+$ && "$_msel" -lt "${#_scan_devs[@]}" ]]; then
-                    IFS='|' read -r _ mac _ <<< "${_scan_devs[$_msel]}"
+                elif [[ "$_msel" =~ ^[0-9]+$ && "$_msel" -ge 1 && "$_msel" -le "${#_scan_devs[@]}" ]]; then
+                    IFS='|' read -r _ mac _ <<< "${_scan_devs[$(( _msel - 1 ))]}"
                 elif [[ "$_msel" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
                     mac="$_msel"
                 fi
@@ -2301,10 +2301,10 @@ menu_scan_network() {
                 local _dven_s="${_dven:0:13}"
                 if [[ "$_dip" == "$_own_ip" ]]; then
                     printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-4s\e[0m  \e[38;5;51m%-15s\e[0m  \e[38;5;220m%-19s\e[0m  \e[38;5;240m%-13s\e[38;5;27m│\e[0m\n" \
-                        "${_i})" "$_dip" "$_dmac" "$_dven_s"
+                        "$(( _i+1 )))" "$_dip" "$_dmac" "$_dven_s"
                 else
                     printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-4s\e[0m  \e[38;5;51m%-15s\e[0m  \e[38;5;214m%-19s\e[0m  \e[38;5;240m%-13s\e[38;5;27m│\e[0m\n" \
-                        "${_i})" "$_dip" "$_dmac" "$_dven_s"
+                        "$(( _i+1 )))" "$_dip" "$_dmac" "$_dven_s"
                 fi
                 (( _i++ ))
             done
@@ -2325,8 +2325,8 @@ menu_scan_network() {
                 printf '  \e[33m[!]\e[0m Opcion invalida.\n'; sleep 0.8 ;;
             *)
                 local _idx="$_sel"
-                if (( _idx < ${#_devs[@]} )); then
-                    IFS='|' read -r _bip _bmac _bven <<< "${_devs[$_idx]}"
+                if (( _idx >= 1 && _idx <= ${#_devs[@]} )); then
+                    IFS='|' read -r _bip _bmac _bven <<< "${_devs[$(( _idx - 1 ))]}"
 
                     # Submenú de accion para el equipo seleccionado
                     clear
