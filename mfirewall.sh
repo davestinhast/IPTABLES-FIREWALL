@@ -117,16 +117,13 @@ draw_banner_animated() {
         "  ║                                                              ║"
         "  ╚══════════════════════════════════════════════════════════════╝"
     )
-    tput civis
     printf '\n'
     local offset=0
     for line in "${B[@]}"; do
         gradient_print "$line" GRAD[@] $offset
         printf '\n'
         (( offset += 2 ))
-        sleep 0.055
     done
-    tput cnorm
     printf '\n'
 }
 
@@ -157,19 +154,7 @@ typewrite() {
 
 # Transición de pantalla — barrido diagonal rápido
 screen_wipe() {
-    local cols rows
-    cols=$(tput cols 2>/dev/null || echo 80)
-    rows=$(tput lines 2>/dev/null || echo 24)
-    tput civis
-    local i
-    for ((i=0; i<rows; i+=2)); do
-        tput cup $i 0
-        printf '\e[48;5;17m%*s\e[0m' "$cols" ""
-        sleep 0.006
-    done
-    sleep 0.04
     clear
-    tput cnorm
 }
 
 # Spinner en background mientras corre la función dada
@@ -185,13 +170,14 @@ run_step() {
 
     # Lanzar animación en subproceso
     (
-        local F=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-        local f=0
+        local F=('·' '·' '·' '·' '·' '·' '·' '·' '·' '·' '·' '·')
+        local f=0 dots=""
         while true; do
-            printf "\r  \e[38;5;39m[%d/%d]\e[0m \e[38;5;51m%s\e[0m %s  " \
-                "$step_n" "$total" "${F[$f]}" "$msg"
-            f=$(( (f + 1) % ${#F[@]} ))
-            sleep 0.075
+            dots="${dots}."
+            [[ ${#dots} -gt 3 ]] && dots=""
+            printf "\r  \e[38;5;39m[%d/%d]\e[0m  %s%-3s  " \
+                "$step_n" "$total" "$msg" "$dots"
+            sleep 0.18
         done
     ) &
     SPINNER_PID=$!
@@ -1877,8 +1863,8 @@ menu_mac() {
                 printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
                 printf '  \e[38;5;27m│\e[0m  \e[1mAgregar MAC — Equipos detectados en la red               \e[38;5;27m│\e[0m\n'
                 printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
-                printf '  \e[38;5;27m│\e[0m  %-4s  %-16s  %-20s  %-12s \e[38;5;27m│\e[0m\n' \
-                    "#" "IP" "MAC" "ID"
+                printf '  \e[38;5;27m│\e[0m  %-4s  %-15s  %-19s  %-13s\e[38;5;27m│\e[0m\n' \
+                    "#" "IP" "MAC" "FABRICANTE"
 
                 # Detectar interfaz e IPs
                 local _sf
@@ -1918,12 +1904,13 @@ menu_mac() {
                     local _si=0
                     for _sd in "${_scan_devs[@]}"; do
                         IFS='|' read -r _sdip _sdmac _sdven <<< "$_sd"
+                        local _sdven_s="${_sdven:0:13}"
                         if [[ "$_sdip" == "$_sown_ip" ]]; then
-                            printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-4s\e[0m  \e[38;5;51m%-16s\e[0m  \e[38;5;220m%-20s\e[0m  \e[38;5;240m%-12s\e[38;5;27m│\e[0m\n" \
-                                "${_si})" "$_sdip" "$_sdmac" "$_sdven"
+                            printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-4s\e[0m  \e[38;5;51m%-15s\e[0m  \e[38;5;220m%-19s\e[0m  \e[38;5;240m%-13s\e[38;5;27m│\e[0m\n" \
+                                "${_si})" "$_sdip" "$_sdmac" "$_sdven_s"
                         else
-                            printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-4s\e[0m  \e[38;5;51m%-16s\e[0m  \e[38;5;214m%-20s\e[0m  \e[38;5;240m%-12s\e[38;5;27m│\e[0m\n" \
-                                "${_si})" "$_sdip" "$_sdmac" "$_sdven"
+                            printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-4s\e[0m  \e[38;5;51m%-15s\e[0m  \e[38;5;214m%-19s\e[0m  \e[38;5;240m%-13s\e[38;5;27m│\e[0m\n" \
+                                "${_si})" "$_sdip" "$_sdmac" "$_sdven_s"
                         fi
                         (( _si++ ))
                     done
@@ -2141,8 +2128,8 @@ menu_scan_network() {
                  | awk '$4~/lladdr/{print $1,"dev",$3,"lladdr",$5,$6}')
 
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  %-4s  %-18s  %-20s  %s\n' \
-            "#" "IP" "MAC" "Identificador"
+        printf '  \e[38;5;27m│\e[0m  %-4s  %-15s  %-19s  %-13s\e[38;5;27m│\e[0m\n' \
+            "#" "IP" "MAC" "FABRICANTE"
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
 
         if [[ ${#_devs[@]} -eq 0 ]]; then
@@ -2152,12 +2139,13 @@ menu_scan_network() {
             local _i=0
             for _d in "${_devs[@]}"; do
                 IFS='|' read -r _dip _dmac _dven <<< "$_d"
+                local _dven_s="${_dven:0:13}"
                 if [[ "$_dip" == "$_own_ip" ]]; then
-                    printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-4s\e[0m  \e[38;5;51m%-18s\e[0m  \e[38;5;220m%-20s\e[0m  \e[38;5;240m%s\e[0m\n" \
-                        "${_i})" "$_dip" "$_dmac" "$_dven"
+                    printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-4s\e[0m  \e[38;5;51m%-15s\e[0m  \e[38;5;220m%-19s\e[0m  \e[38;5;240m%-13s\e[38;5;27m│\e[0m\n" \
+                        "${_i})" "$_dip" "$_dmac" "$_dven_s"
                 else
-                    printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-4s\e[0m  \e[38;5;51m%-18s\e[0m  \e[38;5;214m%-20s\e[0m  \e[38;5;240m%s\e[0m\n" \
-                        "${_i})" "$_dip" "$_dmac" "$_dven"
+                    printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-4s\e[0m  \e[38;5;51m%-15s\e[0m  \e[38;5;214m%-19s\e[0m  \e[38;5;240m%-13s\e[38;5;27m│\e[0m\n" \
+                        "${_i})" "$_dip" "$_dmac" "$_dven_s"
                 fi
                 (( _i++ ))
             done
