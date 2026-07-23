@@ -1305,6 +1305,60 @@ teardown_dns_proxy() {
 }
 
 # =============================================================================
+# DEMO: mata Firefox, limpia cache/service-workers, abre sitios bloqueados
+# =============================================================================
+open_demo_browser() {
+    # Matar Firefox completamente para que no haya cache en RAM
+    pkill -9 -f "firefox" 2>/dev/null || true
+    local _w=0
+    while pgrep -f "firefox" >/dev/null 2>&1 && (( _w++ < 20 )); do
+        sleep 0.15
+    done
+
+    # Borrar cache disco + service worker storage de los 3 dominios bloqueados
+    for _prof in \
+        /root/.mozilla/firefox/*.default* \
+        /root/.mozilla/firefox/*.default-esr* \
+        /home/*/.mozilla/firefox/*.default* \
+        /home/*/.mozilla/firefox/*.default-esr*; do
+        [[ -d "$_prof" ]] || continue
+        rm -rf "$_prof/cache2"                                          2>/dev/null || true
+        rm -rf "$_prof/storage/default/https+++www.youtube.com"*        2>/dev/null || true
+        rm -rf "$_prof/storage/default/https+++youtube.com"*            2>/dev/null || true
+        rm -rf "$_prof/storage/default/https+++www.facebook.com"*       2>/dev/null || true
+        rm -rf "$_prof/storage/default/https+++www.hotmail.com"*        2>/dev/null || true
+        rm -rf "$_prof/storage/default/https+++outlook.live.com"*       2>/dev/null || true
+        rm -f  "$_prof/serviceworker.txt"                               2>/dev/null || true
+    done
+    rm -rf /root/.cache/mozilla/firefox/*/cache2                        2>/dev/null || true
+
+    # Construir lista de URLs según bloqueos activos
+    local _urls=()
+    [[ "$BLOCK_YOUTUBE"  == "true" ]] && _urls+=("https://www.youtube.com")
+    [[ "$BLOCK_FACEBOOK" == "true" ]] && _urls+=("https://www.facebook.com")
+    [[ "$BLOCK_HOTMAIL"  == "true" ]] && _urls+=("https://outlook.live.com")
+
+    [[ ${#_urls[@]} -eq 0 ]] && { logc "open_demo_browser: sin URLs activas"; return; }
+
+    # Lanzar Firefox como usuario real (soporta sudo y login directo como root)
+    local _user="${SUDO_USER:-root}"
+    local _disp="${DISPLAY:-:0}"
+    local _ff
+    _ff=$(command -v firefox-esr 2>/dev/null \
+       || command -v firefox    2>/dev/null \
+       || echo "firefox-esr")
+
+    logc "Demo: lanzando $_ff con ${#_urls[@]} sitio(s) → deben fallar"
+
+    if [[ "$_user" != "root" ]]; then
+        DISPLAY="$_disp" sudo -u "$_user" nohup "$_ff" "${_urls[@]}" >/dev/null 2>&1 &
+    else
+        DISPLAY="$_disp" nohup "$_ff" "${_urls[@]}" >/dev/null 2>&1 &
+    fi
+    sleep 1.2   # dar tiempo al OS para arrancar el proceso antes de que el menú regrese
+}
+
+# =============================================================================
 # ENABLE
 # =============================================================================
 enable_firewall() {
@@ -1326,7 +1380,7 @@ enable_firewall() {
     printf '\n\n'
 
     # Calcular total de pasos
-    local total=7  # base + ipsets + SNI + DNS-hex + DNS-proxy + hosts + firefox
+    local total=8  # base + ipsets + SNI + DNS-hex + DNS-proxy + hosts + firefox + demo
     [[ "$BLOCK_FACEBOOK" == "true" ]] && (( total++ ))
     [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))  # ipset resolve
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && (( total++ ))
@@ -1382,6 +1436,9 @@ enable_firewall() {
     draw_progress_bar $step $total
 
     (( step++ )); run_step $step $total "Limpiando caché DNS" flush_dns
+    draw_progress_bar $step $total
+
+    (( step++ )); run_step $step $total "Abriendo Firefox (sitios bloqueados)" open_demo_browser
     draw_progress_bar $step $total
 
     printf '[%s] FIREWALL ACTIVADO FB:%s YT:%s HM:%s\n' \
