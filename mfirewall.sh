@@ -2208,11 +2208,72 @@ menu_connlimit() {
                 printf '  \e[38;5;240m      Sugerido: 50 HTTPS · 10 SSH · 5 para restringir fuerte\e[0m\n'
                 read -rp "  Máximo: " max
 
-                printf '\n  \e[38;5;51m[4]\e[0m  IP objetivo (Enter = todos los equipos de la red)\n'
-                printf '  \e[38;5;240m      Deja vacío para limitar a TODOS los clientes.\e[0m\n'
-                printf '  \e[38;5;240m      Escribe una IP para limitar solo ese equipo.\e[0m\n'
-                printf '  \e[38;5;240m      Usa opcion 9 (scanner) para ver IPs disponibles.\e[0m\n'
-                read -rp "  IP (o Enter para todos): " target_ip
+                printf '\n  \e[38;5;51m[4]\e[0m  IP objetivo — equipos conectados ahora:\n'
+                printf '  \e[38;5;240m      Escaneando red...\e[0m\n'
+
+                # Escaneo inline igual que menu_scan_network
+                local _cl_iface
+                _cl_iface=$(ip route get 1.1.1.1 2>/dev/null \
+                    | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+                [[ -z "$_cl_iface" ]] && _cl_iface=$(ip -o link show \
+                    | awk -F': ' '!/lo/{print $2}' | head -1)
+
+                local _cl_own_mac _cl_own_ip
+                _cl_own_mac=$(ip link show "$_cl_iface" 2>/dev/null | awk '/ether/{print $2}')
+                _cl_own_ip=$(ip -4 addr show "$_cl_iface" 2>/dev/null \
+                    | awk '/inet /{print $2}' | cut -d/ -f1)
+
+                declare -a _cl_ips _cl_macs _cl_vens
+                # propia máquina
+                _cl_ips+=("$_cl_own_ip")
+                _cl_macs+=("$_cl_own_mac")
+                _cl_vens+=("este equipo (Kali)")
+
+                # arp-scan
+                if command -v arp-scan &>/dev/null; then
+                    while IFS=$'\t' read -r _cip _cmac _cven; do
+                        [[ "$_cmac" == "$_cl_own_mac" ]] && continue
+                        _cl_ips+=("$_cip"); _cl_macs+=("$_cmac")
+                        _cl_vens+=("${_cven:-desconocido}")
+                    done < <(arp-scan --interface="$_cl_iface" --localnet 2>/dev/null \
+                        | awk '/^[0-9]/{print $1"\t"$2"\t"$3}')
+                fi
+                # ip neigh fallback
+                while IFS=' ' read -r _nip _ _ _ _nmac _; do
+                    [[ -z "$_nmac" || "$_nmac" == "FAILED" ]] && continue
+                    local _already=false
+                    for _x in "${_cl_macs[@]}"; do [[ "$_x" == "$_nmac" ]] && _already=true; done
+                    $already && continue
+                    _cl_ips+=("$_nip"); _cl_macs+=("$_nmac"); _cl_vens+=("vecino ARP")
+                done < <(ip neigh show 2>/dev/null | grep -v "^$_cl_own_ip ")
+
+                printf '\n'
+                printf '  \e[38;5;27m╭──────┬──────────────────┬───────────────────────╮\e[0m\n'
+                printf '  \e[38;5;27m│\e[0m  \e[1m%-3s\e[0m \e[38;5;27m│\e[0m  \e[1m%-16s\e[0m \e[38;5;27m│\e[0m  \e[1m%-21s\e[0m \e[38;5;27m│\e[0m\n' \
+                    "#" "IP" "DISPOSITIVO"
+                printf '  \e[38;5;27m├──────┼──────────────────┼───────────────────────┤\e[0m\n'
+                local _ci
+                for (( _ci=0; _ci<${#_cl_ips[@]}; _ci++ )); do
+                    local _cven_s="${_cl_vens[$_ci]:0:21}"
+                    printf '  \e[38;5;27m│\e[0m  \e[38;5;214m%-3d\e[0m \e[38;5;27m│\e[0m  \e[38;5;51m%-16s\e[0m \e[38;5;27m│\e[0m  %-21s \e[38;5;27m│\e[0m\n' \
+                        $(( _ci+1 )) "${_cl_ips[$_ci]}" "$_cven_s"
+                done
+                printf '  \e[38;5;27m│\e[0m  \e[38;5;46m  0\e[0m \e[38;5;27m│\e[0m  \e[38;5;46m%-16s\e[0m \e[38;5;27m│\e[0m  %-21s \e[38;5;27m│\e[0m\n' \
+                    "todos" "limitar a TODOS"
+                printf '  \e[38;5;27m╰──────┴──────────────────┴───────────────────────╯\e[0m\n\n'
+
+                local target_ip=""
+                read -rp "  Número (0 = todos, o escribe IP manual): " _csel
+                if [[ "$_csel" == "0" || -z "$_csel" ]]; then
+                    target_ip=""
+                elif [[ "$_csel" =~ ^[0-9]+$ ]] && (( _csel >= 1 && _csel <= ${#_cl_ips[@]} )); then
+                    target_ip="${_cl_ips[$(( _csel-1 ))]}"
+                    printf '  \e[38;5;46m✓ Seleccionado:\e[0m  %s  (%s)\n' \
+                        "$target_ip" "${_cl_vens[$(( _csel-1 ))]}"
+                else
+                    # input manual
+                    target_ip="$_csel"
+                fi
 
                 if [[ "$proto" =~ ^(tcp|udp)$ && "$port" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ ]]; then
                     local _entry="${proto}:${port}:${max}"
