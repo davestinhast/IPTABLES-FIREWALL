@@ -1966,6 +1966,135 @@ menu_connlimit() {
 }
 
 # =============================================================================
+# ESCANEO DE RED: detecta equipos con IP + MAC para bloquear
+# =============================================================================
+menu_scan_network() {
+    while true; do
+        clear
+        printf '\n'
+        printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mEscaneo de Red Local\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mDetecta equipos conectados — IP, MAC e identificador\e[0m\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mEscaneando...\e[0m\n'
+
+        # Detectar interfaz activa
+        local _iface
+        _iface=$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+        [[ -z "$_iface" ]] && _iface=$(ip -o link show | awk -F': ' '!/lo/{print $2}' | head -1)
+
+        # MAC e IP propias
+        local _own_mac _own_ip
+        _own_mac=$(ip link show "$_iface" 2>/dev/null | awk '/ether/{print $2}')
+        _own_ip=$(ip -4 addr show "$_iface" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+
+        # Red local en CIDR
+        local _net
+        _net=$(ip -4 addr show "$_iface" 2>/dev/null \
+               | awk '/inet /{print $2}' \
+               | head -1)
+
+        # Construir tabla de dispositivos: "IP MAC VENDOR"
+        declare -a _devs=()
+
+        # Agregar el propio equipo primero
+        [[ -n "$_own_ip" && -n "$_own_mac" ]] && \
+            _devs+=("$_own_ip|$_own_mac|este equipo (Kali)")
+
+        # Intentar arp-scan si está disponible
+        if command -v arp-scan &>/dev/null; then
+            while IFS=$'\t' read -r _ip _mac _vendor; do
+                [[ "$_ip" =~ ^[0-9]+\.[0-9]+ ]] || continue
+                [[ "$_ip" == "$_own_ip" ]]       && continue
+                _devs+=("$_ip|$_mac|${_vendor:-desconocido}")
+            done < <(arp-scan --interface="$_iface" --localnet 2>/dev/null \
+                     | grep -E '^[0-9]+\.[0-9]+')
+        fi
+
+        # Siempre agregar tabla ARP del kernel (sin duplicar)
+        while read -r _ip _ _ _mac _; do
+            [[ "$_ip" =~ ^[0-9]+\.[0-9]+ ]] || continue
+            [[ "$_ip" == "$_own_ip" ]]       && continue
+            local _dup=false
+            for _d in "${_devs[@]}"; do
+                [[ "${_d%%|*}" == "$_ip" ]] && _dup=true && break
+            done
+            [[ "$_dup" == false ]] && _devs+=("$_ip|${_mac:-??:??:??:??:??:??}|ARP cache")
+        done < <(ip neigh show dev "$_iface" 2>/dev/null \
+                 | awk '$4~/lladdr/{print $1,"dev",$3,"lladdr",$5,$6}')
+
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  %-4s  %-18s  %-20s  %s\n' \
+            "#" "IP" "MAC" "Identificador"
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+
+        if [[ ${#_devs[@]} -eq 0 ]]; then
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;240m  Sin dispositivos detectados en la red.\e[0m\n'
+            printf '  \e[38;5;27m│\e[0m  \e[38;5;240m  Asegurate de estar conectado a una red local.\e[0m\n'
+        else
+            local _i=0
+            for _d in "${_devs[@]}"; do
+                IFS='|' read -r _dip _dmac _dven <<< "$_d"
+                if [[ "$_dip" == "$_own_ip" ]]; then
+                    printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-4s\e[0m  \e[38;5;51m%-18s\e[0m  \e[38;5;220m%-20s\e[0m  \e[38;5;240m%s\e[0m\n" \
+                        "${_i})" "$_dip" "$_dmac" "$_dven"
+                else
+                    printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-4s\e[0m  \e[38;5;51m%-18s\e[0m  \e[38;5;214m%-20s\e[0m  \e[38;5;240m%s\e[0m\n" \
+                        "${_i})" "$_dip" "$_dmac" "$_dven"
+                fi
+                (( _i++ ))
+            done
+        fi
+
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45mr)\e[0m  Reescanear\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Volver al menú\n'
+        printf '  \e[38;5;27m╰──────────────────────────────────────────────────────────────╯\e[0m\n'
+        printf '\n'
+
+        read -rp "  Numero para bloquear MAC, [r] reescanear, [0] volver: " _sel
+
+        case "$_sel" in
+            r|R) continue ;;
+            0)   return ;;
+            ''|*[!0-9]*)
+                [[ "$_sel" == "r" || "$_sel" == "R" || "$_sel" == "0" ]] && continue
+                printf '  \e[33m[!]\e[0m Opcion invalida.\n'; sleep 0.8
+                ;;
+            *)
+                local _idx="$_sel"
+                if (( _idx < ${#_devs[@]} )); then
+                    IFS='|' read -r _bip _bmac _bven <<< "${_devs[$_idx]}"
+                    # Agregar a MAC_BLOCKS_STR si no esta ya
+                    local _already=false
+                    IFS=',' read -ra _cur <<< "$MAC_BLOCKS_STR"
+                    for _m in "${_cur[@]}"; do
+                        [[ "${_m,,}" == "${_bmac,,}" ]] && _already=true && break
+                    done
+                    if [[ "$_already" == true ]]; then
+                        printf '\n  \e[33m[!]\e[0m  MAC %s ya esta en la lista.\n' "$_bmac"
+                    else
+                        if [[ -z "$MAC_BLOCKS_STR" ]]; then
+                            MAC_BLOCKS_STR="$_bmac"
+                        else
+                            MAC_BLOCKS_STR="${MAC_BLOCKS_STR},${_bmac}"
+                        fi
+                        save_config
+                        printf '\n  \e[38;5;46m[+]\e[0m  MAC \e[1m%s\e[0m (%s) agregada al bloqueo.\n' \
+                            "$_bmac" "$_bip"
+                        printf '  \e[2m    Activa el firewall (opcion 1) para aplicar el bloqueo.\e[0m\n'
+                    fi
+                    sleep 1.8
+                else
+                    printf '  \e[33m[!]\e[0m Numero fuera de rango.\n'; sleep 0.8
+                fi
+                ;;
+        esac
+        unset _devs
+    done
+}
+
+# =============================================================================
 # MENÚ PRINCIPAL
 # =============================================================================
 main_menu() {
@@ -1996,6 +2125,7 @@ main_menu() {
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;39m6)\e[0m  Dashboard en vivo  \e[2m— monitoreo en tiempo real [q] salir\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;39m7)\e[0m  Registro de paquetes  \e[2m— logs PM-DROP del kernel\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m9)\e[0m  Escanear red  \e[2m— ver IPs/MACs conectadas y bloquear\e[0m\n'
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;196m8)\e[0m  Reset total de red  \e[2m— eliminar todo, restaurar internet\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Salir\n'
@@ -2011,8 +2141,9 @@ main_menu() {
             4) menu_connlimit ;;
             5) menu_interfaces; read -rp $'\n  Presiona Enter...' ;;
             6) show_dashboard ;;
-            7) show_logs;    read -rp $'\n  Presiona Enter...' ;;
-            8) deep_reset;   read -rp $'\n  Presiona Enter...' ;;
+            7) show_logs;         read -rp $'\n  Presiona Enter...' ;;
+            9) menu_scan_network ;;
+            8) deep_reset;        read -rp $'\n  Presiona Enter...' ;;
             0) printf '\n'; gradient_print "  Hasta luego." GRAD[@] 0; printf '\n\n'; exit 0 ;;
             *) printf '  \e[31mOpción inválida.\e[0m\n'; sleep 0.8 ;;
         esac
