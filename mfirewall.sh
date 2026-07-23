@@ -1958,9 +1958,6 @@ menu_interfaces() {
         printf '  \e[38;5;27m│\e[0m  \e[2minternet (WAN) y cuál conecta a los clientes (LAN).\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[2mSi tienes una sola tarjeta (eth0), será WAN y LAN.\e[0m\n'
         printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[2mWAN = tarjeta conectada a internet\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[2mLAN = tarjeta conectada a la red local de clientes\e[0m\n'
-        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[2mInterfaces detectadas en este sistema:\e[0m\n'
         ip -o link show 2>/dev/null \
             | awk -F': ' '{printf "  \033[38;5;27m│\033[0m     \033[38;5;51m%-14s\033[0m\n", $2}' \
@@ -1969,11 +1966,12 @@ menu_interfaces() {
         if [[ "${_auto}" == "true" ]]; then
             printf '  \e[38;5;27m│\e[0m  \e[38;5;46m✓ Auto-detectado\e[0m\n'
         fi
-        printf "  \e[38;5;27m│\e[0m  WAN:  \e[1m\e[38;5;46m%-20s\e[0m  \e[2m(internet)\e[0m\n"  "${WAN_IFACE:-no detectada}"
-        printf "  \e[38;5;27m│\e[0m  LAN:  \e[1m\e[38;5;46m%-20s\e[0m  \e[2m(clientes)\e[0m\n" "${LAN_IFACE:-no detectada}"
+        printf "  \e[38;5;27m│\e[0m  WAN:  \e[1m\e[38;5;46m%-20s\e[0m  \e[2m(tarjeta hacia internet)\e[0m\n"  "${WAN_IFACE:-—}"
+        printf "  \e[38;5;27m│\e[0m  LAN:  \e[1m\e[38;5;46m%-20s\e[0m  \e[2m(tarjeta hacia clientes)\e[0m\n" "${LAN_IFACE:-—}"
         printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;46ma)\e[0m  Re-detectar automáticamente\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;45mm)\e[0m  Cambiar manualmente\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;196mc)\e[0m  Limpiar (borrar WAN y LAN guardadas)\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;240m0)\e[0m  Volver al menú principal\n'
         printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
 
@@ -1990,13 +1988,21 @@ menu_interfaces() {
             m|M)
                 _auto=false
                 printf '\n'
-                read -rp "  Nueva WAN (Enter = mantener '${WAN_IFACE:-vacío}'): " w
-                read -rp "  Nueva LAN (Enter = mantener '${LAN_IFACE:-vacío}'): " l
+                read -rp "  Nueva WAN (Enter = mantener '${WAN_IFACE:-—}'): " w
+                read -rp "  Nueva LAN (Enter = mantener '${LAN_IFACE:-—}'): " l
                 [[ -n "$w" ]] && WAN_IFACE="$w"
                 [[ -n "$l" ]] && LAN_IFACE="$l"
                 save_config
                 printf '\n  \e[38;5;46m✓ Guardado  →  WAN: %s  |  LAN: %s\e[0m\n' \
                     "${WAN_IFACE:-—}" "${LAN_IFACE:-—}"
+                sleep 1
+                ;;
+            c|C)
+                WAN_IFACE=""
+                LAN_IFACE=""
+                _auto=false
+                save_config
+                printf '\n  \e[38;5;196m✓ WAN y LAN borradas.\e[0m\n'
                 sleep 1
                 ;;
             0) return ;;
