@@ -489,7 +489,10 @@ FIREFOX_POLICY='{
       "network.trr.uri":                       { "Value": "",   "Status": "locked" },
       "network.trr.bootstrapAddress":          { "Value": "",   "Status": "locked" },
       "network.dns.disablePrefetch":           { "Value": true, "Status": "locked" },
-      "network.dns.disablePrefetchFromHTTPS":  { "Value": true, "Status": "locked" }
+      "network.dns.disablePrefetchFromHTTPS":  { "Value": true, "Status": "locked" },
+      "network.dns.echconfig.enabled":         { "Value": false, "Status": "locked" },
+      "network.dns.use_https_rr_as_altsvc":    { "Value": false, "Status": "locked" },
+      "security.tls.ech.grease_http3":         { "Value": false, "Status": "locked" }
     }
   }
 }'
