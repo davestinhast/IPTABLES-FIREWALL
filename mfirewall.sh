@@ -492,7 +492,8 @@ FIREFOX_POLICY='{
       "network.dns.disablePrefetchFromHTTPS":  { "Value": true, "Status": "locked" },
       "network.dns.echconfig.enabled":         { "Value": false, "Status": "locked" },
       "network.dns.use_https_rr_as_altsvc":    { "Value": false, "Status": "locked" },
-      "security.tls.ech.grease_http3":         { "Value": false, "Status": "locked" }
+      "security.tls.ech.grease_http3":         { "Value": false, "Status": "locked" },
+      "network.dns.disableIPv6":               { "Value": true,  "Status": "locked" }
     }
   }
 }'
@@ -732,7 +733,21 @@ apply_sni_rules() {
         # Bloqueo global QUIC/HTTP3 IPv4 + IPv6 — YouTube lo usa agresivamente
         cmd iptables -A PM_WEBBLOCK -p udp --dport 443 -j PM_REJECT
         ip6tables -A PM_WEBBLOCK -p udp --dport 443 -j REJECT 2>/dev/null || true
-        logc "YouTube SNI: ${#sni_yt[@]} dominios + QUIC UDP 443 (IPv4+IPv6)"
+
+        # Rangos IPv4 adicionales de YouTube CDN no capturados por ipset (Anycast)
+        cmd iptables -A PM_WEBBLOCK -d 34.107.0.0/16  -j PM_REJECT
+        cmd iptables -A PM_WEBBLOCK -d 34.98.0.0/16   -j PM_REJECT
+
+        # Rangos IPv6 de Google/YouTube CDN — Firefox los usa cuando ECH está activo
+        # network.dns.disableIPv6 en la policy de Firefox previene esto,
+        # pero estas reglas actuan como capa de respaldo
+        ip6tables -A PM_WEBBLOCK -d 2800:3f0::/32  -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -d 2001:4860::/32 -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -d 2607:f8b0::/32 -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -d 2404:6800::/32 -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -d 2a00:1450::/32 -j REJECT 2>/dev/null || true
+
+        logc "YouTube SNI: ${#sni_yt[@]} dominios + QUIC UDP 443 + CIDR IPv4/IPv6 CDN"
     fi
     if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
         for domain in "${sni_hm[@]}"; do
