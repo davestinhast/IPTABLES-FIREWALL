@@ -1311,7 +1311,6 @@ enable_firewall() {
     local total=7  # base + ipsets + SNI + DNS-hex + DNS-proxy + hosts + firefox
     [[ "$BLOCK_FACEBOOK" == "true" ]] && (( total++ ))
     [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))  # ipset resolve
-    [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))  # rangos CIDR goog.json
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && (( total++ ))
     [[ -n "$MAC_BLOCKS_STR" ]]  && (( total++ ))
     [[ -n "$CONN_LIMITS_STR" ]] && (( total++ ))
@@ -1333,8 +1332,6 @@ enable_firewall() {
             "tcp:80" "tcp:443" "udp:443" "tcp:853:any" "udp:853:any"
         draw_progress_bar $step $total
 
-        (( step++ )); run_step $step $total "Bloqueando rangos IP Google/YouTube (iptables CIDR)" apply_goog_ranges_iptables
-        draw_progress_bar $step $total
     fi
     if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
         (( step++ ))
