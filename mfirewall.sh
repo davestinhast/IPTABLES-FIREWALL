@@ -424,6 +424,14 @@ remove_hosts_block() {
     fi
 }
 
+# =============================================================================
+# PASO 10 — Inyeccion en /etc/hosts (capa de bloqueo a nivel del sistema)
+#   /etc/hosts se consulta ANTES que DNS. Si un dominio aparece apuntando a
+#   0.0.0.0, el sistema operativo nunca hace la query DNS y nunca obtiene
+#   la IP real. Es la capa mas rapida y de menor costo de procesamiento.
+#   Se agrega un bloque marcado entre BEGIN/END M-FIREWALL para poder
+#   eliminarlo limpiamente al desactivar el firewall.
+# =============================================================================
 apply_all_hosts() {
     logsec "/etc/hosts"
     remove_hosts_block
@@ -516,14 +524,39 @@ remove_firefox_doh_block() {
 }
 
 # =============================================================================
-# IPTABLES BASE
+# IPTABLES BASE — construye todas las cadenas personalizadas del firewall
+#
+# PASO 1: Crear cadenas personalizadas
+#   Las cadenas organizan las reglas por funcion. En vez de meter todo en
+#   FORWARD/OUTPUT directamente, cada cadena tiene una responsabilidad clara:
+#     PM_REJECT    → registra en kernel y rechaza el paquete
+#     PM_WEBBLOCK  → bloqueo por sitio web (IP, SNI, DNS, CIDR)
+#     PM_MACBLOCK  → bloqueo por direccion MAC del equipo cliente
+#     PM_CONNLIMIT → limite de conexiones simultaneas por IP
+#
+# PASO 2: Configurar PM_REJECT (registro + rechazo)
+#   Todo paquete bloqueado llega a PM_REJECT. Primero escribe una linea en
+#   el log del kernel con el prefijo PM-DROP (visible con journalctl -k o
+#   dmesg). Luego rechaza el paquete enviando TCP RST al cliente.
+#
+# PASO 3: Bloquear cliente→servidor, permitir servidor→cliente
+#   La regla ESTABLISHED,RELATED se coloca PRIMERA en FORWARD. El kernel
+#   rastrea el estado de cada conexion con conntrack. Un paquete nuevo (SYN)
+#   tiene estado NEW y cae en las cadenas de bloqueo. Una respuesta del
+#   servidor tiene estado ESTABLISHED y pasa directo sin revisarse.
+#   Resultado: el cliente no puede abrir nuevas conexiones a sitios bloqueados,
+#   pero las respuestas de sesiones ya existentes siguen pasando.
+#
+# PASO 4: Enganchar las cadenas en el trafico real
+#   FORWARD cubre el trafico de clientes que pasa por este servidor Kali.
+#   OUTPUT cubre el trafico generado por el propio Kali.
+#   El orden importa: ESTABLISHED primero, luego MAC, connlimit, web.
 # =============================================================================
 setup_base_chains() {
     logsec "Cadenas iptables + ip6tables"
-    # Módulo de string matching (SNI)
     modprobe xt_string 2>/dev/null || true
 
-    # ── IPv4 ────────────────────────────────────────────────────────────────────
+    # ── Limpiar estado previo (IPv4) ────────────────────────────────────────────
     for chain in PM_REJECT PM_WEBBLOCK PM_MACBLOCK PM_CONNLIMIT; do
         iptables -F "$chain" 2>/dev/null || true
         iptables -X "$chain" 2>/dev/null || true
@@ -534,23 +567,32 @@ setup_base_chains() {
     iptables -D FORWARD -j PM_CONNLIMIT 2>/dev/null || true
     iptables -D FORWARD -j PM_WEBBLOCK  2>/dev/null || true
     iptables -D OUTPUT  -j PM_WEBBLOCK  2>/dev/null || true
-    # Permitir respuestas de conexiones establecidas en FORWARD (server→client)
     iptables -D FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+
+    # PASO 1 — Crear cadenas personalizadas
     cmd iptables -N PM_REJECT
     cmd iptables -N PM_WEBBLOCK
     cmd iptables -N PM_MACBLOCK
     cmd iptables -N PM_CONNLIMIT
+
+    # PASO 2 — PM_REJECT: guardar registro en kernel y rechazar paquete
+    # Cada paquete bloqueado genera una entrada PM-DROP en journalctl/dmesg
     cmd iptables -A PM_REJECT -j LOG --log-prefix "PM-DROP: " --log-level 4
     cmd iptables -A PM_REJECT -p tcp -j REJECT --reject-with tcp-reset
     cmd iptables -A PM_REJECT -j REJECT --reject-with icmp-port-unreachable
-    # ESTABLISHED/RELATED primero — tráfico servidor→cliente (respuestas) siempre pasa
+
+    # PASO 3 — Permitir servidor→cliente (respuestas de sesiones existentes)
+    # Esta regla va PRIMERA. Estado ESTABLISHED = conexion ya abierta.
+    # El SYN inicial del cliente tiene estado NEW, no entra aqui, cae en WEBBLOCK.
     cmd iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+    # PASO 4 — Enganchar cadenas: bloqueo por MAC, connlimit y sitios web
     cmd iptables -A FORWARD -j PM_MACBLOCK
     cmd iptables -A FORWARD -j PM_CONNLIMIT
     cmd iptables -A FORWARD -j PM_WEBBLOCK
     cmd iptables -A OUTPUT  -j PM_WEBBLOCK
 
-    # ── IPv6 — misma estructura para bloquear bypass por AAAA records ───────────
+    # ── IPv6: misma estructura — Firefox usa IPv6 para bypassear reglas IPv4 ─────
     ip6tables -F PM_WEBBLOCK 2>/dev/null || true
     ip6tables -X PM_WEBBLOCK 2>/dev/null || true
     ip6tables -D FORWARD -j PM_WEBBLOCK 2>/dev/null || true
@@ -562,15 +604,17 @@ setup_base_chains() {
     ip6tables -A OUTPUT  -j PM_WEBBLOCK 2>/dev/null || true
 
     cmd sysctl -w net.ipv4.ip_forward=1
-    # Limpiar conexiones activas para que las reglas apliquen inmediatamente
     conntrack -F 2>/dev/null || true
-    logc "Cadenas IPv4+IPv6 configuradas — ESTABLISHED/RELATED permitido (server->client)"
+    logc "Cadenas IPv4+IPv6 listas — ESTABLISHED/RELATED activo (servidor->cliente permitido)"
 }
 
 # =============================================================================
-# DNS WIRE-PROTOCOL BLOCKING — bloquea queries DNS antes de que el browser
-# reciba la IP. Hex-string coincide con la codificación DNS del dominio:
-# "youtube.com" → \x07youtube\x03com (longitud + etiqueta + longitud + etiqueta)
+# PASO 8 — Bloqueo DNS a nivel kernel (wire protocol, puerto 53)
+#   Bloquea la query DNS antes de que el browser reciba la IP del dominio.
+#   Sin IP el browser no puede conectar, aunque eluda /etc/hosts o el proxy.
+#   El nombre del dominio en DNS wire format se codifica como longitud+etiqueta:
+#   "youtube.com" → \x07youtube\x03com (0x07=7 letras, 0x03=3 letras)
+#   iptables busca esa secuencia de bytes en el payload UDP/TCP del puerto 53.
 # Esto atrapa browsers que bypassean /etc/hosts pero no pueden bypassear el kernel.
 # =============================================================================
 apply_dns_block() {
@@ -682,8 +726,22 @@ apply_goog_ranges_iptables() {
 }
 
 # =============================================================================
-# SNI BLOCKING — coincide con nombre de dominio en TLS ClientHello (texto plano)
-# Funciona aunque las IPs de YouTube roten en Anycast de Google
+# PASO 7 — Bloqueo de sitios web (PM_WEBBLOCK): capas de bloqueo
+#
+#   Facebook y Hotmail se bloquean con 2 capas:
+#     a) ipset: IPs resueltas al activar el firewall  → -m set --match-set
+#     b) SNI:   nombre del dominio en TLS ClientHello → -m string --string
+#
+#   YouTube necesita capas adicionales porque:
+#     - Sus IPs rotan (Anycast de Google) → ipset no captura todas
+#     - Firefox cifra el SNI con ECH (Firefox 118+) → string match falla
+#     - Usa QUIC/HTTP3 sobre UDP 443 → reglas TCP no aplican
+#     - Se conecta por IPv6 → reglas IPv4 no aplican
+#   Soluciones aplicadas:
+#     c) QUIC:  bloqueo UDP 443 para cortar HTTP3
+#     d) CIDR:  rangos IPv4 especificos (34.107.0.0/16, 34.98.0.0/16)
+#     e) IPv6:  rangos CIDR del AS15169 de Google en ip6tables
+#     f) ECH:   desactivado via politica enterprise de Firefox
 # =============================================================================
 apply_sni_rules() {
     logsec "SNI string-match blocking"
@@ -937,17 +995,35 @@ show_dashboard() {
     stty echo 2>/dev/null
 }
 
+# =============================================================================
+# PASO 5 — Bloqueo por MAC address
+#   El modulo xt_mac de iptables lee la direccion MAC del frame Ethernet
+#   del paquete que llega a FORWARD. Si coincide con una MAC configurada,
+#   el paquete va a PM_REJECT. Esto bloquea todo el trafico de ese equipo
+#   sin importar que IP tenga o que protocolo use.
+#   Las MACs se configuran desde el menu opcion 3 o desde el scanner opcion 9.
+# =============================================================================
 apply_mac_blocks() {
     [[ -z "$MAC_BLOCKS_STR" ]] && return
     logsec "MAC Blocking"
     IFS=',' read -ra _macs <<< "$MAC_BLOCKS_STR"
     local mac; for mac in "${_macs[@]}"; do
         [[ -z "$mac" ]] && continue
+        # PASO 5: bloquear trafico de este equipo por su MAC de hardware
         cmd iptables -A PM_MACBLOCK -m mac --mac-source "$mac" -j PM_REJECT
         logc "MAC bloqueada: $mac"
     done
 }
 
+# =============================================================================
+# PASO 6 — Limite de conexiones simultaneas por IP
+#   El modulo xt_connlimit cuenta cuantas conexiones TCP activas tiene una
+#   IP de origen hacia un puerto especifico. Si supera el maximo configurado,
+#   la siguiente conexion va a PM_REJECT.
+#   --connlimit-mask 32 = cada IP cuenta por separado (no por subred).
+#   Si se configuro una IP especifica desde el scanner, se agrega -s IP
+#   para limitar solo ese equipo en lugar de todos.
+# =============================================================================
 apply_conn_limits() {
     [[ -z "$CONN_LIMITS_STR" ]] && return
     logsec "Connection Limits"
@@ -1087,6 +1163,24 @@ PYEOF
     chmod +x "$DNS_PROXY_SCRIPT"
 }
 
+# =============================================================================
+# PASO 9 — Proxy DNS local + NAT REDIRECT (anti-bypass de DNS)
+#
+#   Problema: Firefox puede usar DNS over HTTPS (DoH) para resolver dominios
+#   sin pasar por el sistema operativo, eludiendo /etc/hosts y el DNS local.
+#
+#   Solucion en 3 partes:
+#     a) Proxy DNS Python3 en 127.0.0.1:53 — devuelve NXDOMAIN para dominios
+#        bloqueados y reenvía el resto al DNS real upstream.
+#     b) NAT REDIRECT — iptables captura CUALQUIER paquete UDP/TCP al puerto
+#        53, sin importar a que IP vaya (8.8.8.8, 1.1.1.1, etc.) y lo
+#        redirige al proxy local. Asi el firewall controla todo el DNS.
+#     c) Anti-loop: el proxy marca sus propias queries con SO_MARK=0x1CA3.
+#        Una regla NAT con -m mark --mark 0x1CA3 -j RETURN las deja pasar
+#        sin redirigir, evitando un bucle infinito.
+#     d) resolv.conf fijado a 127.0.0.1 con chattr +i para que NetworkManager
+#        no pueda sobreescribir el DNS del sistema.
+# =============================================================================
 setup_dns_proxy() {
     logsec "DNS proxy + NAT intercept (anti-bypass total)"
 
