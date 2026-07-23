@@ -1872,21 +1872,83 @@ menu_mac() {
         read -rp "  Opción: " opt
         case "$opt" in
             a|A)
-                printf '\n  \e[1mAgregar dirección MAC al bloqueo\e[0m\n\n'
-                printf '  \e[2mFormato requerido:\e[0m  \e[38;5;51mAA:BB:CC:DD:EE:FF\e[0m\n'
-                printf '  \e[2mEjemplo:\e[0m           \e[38;5;51m00:1A:2B:3C:4D:5E\e[0m\n\n'
-                printf '  \e[2mPara obtener la MAC de un equipo cliente:\e[0m\n'
-                printf '  \e[38;5;240m  ip neigh show   (tabla ARP de esta máquina)\e[0m\n'
-                printf '  \e[38;5;240m  arp -a          (alternativa)\e[0m\n\n'
-                read -rp "  MAC address: " mac
+                clear
+                printf '\n'
+                printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+                printf '  \e[38;5;27m│\e[0m  \e[1mAgregar MAC — Equipos detectados en la red               \e[38;5;27m│\e[0m\n'
+                printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+                printf '  \e[38;5;27m│\e[0m  %-4s  %-16s  %-20s  %-12s \e[38;5;27m│\e[0m\n' \
+                    "#" "IP" "MAC" "ID"
+
+                # Detectar interfaz e IPs
+                local _sf
+                _sf=$(ip route get 1.1.1.1 2>/dev/null \
+                    | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+                [[ -z "$_sf" ]] && _sf=$(ip -o link show | awk -F': ' '!/lo/{print $2}' | head -1)
+                local _sown_ip _sown_mac
+                _sown_ip=$(ip -4 addr show "$_sf" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+                _sown_mac=$(ip link show "$_sf" 2>/dev/null | awk '/ether/{print $2}')
+
+                declare -a _scan_devs=()
+                [[ -n "$_sown_ip" ]] && _scan_devs+=("$_sown_ip|${_sown_mac}|este equipo (Kali)")
+
+                if command -v arp-scan &>/dev/null; then
+                    while IFS=$'\t' read -r _sip _smac _sven; do
+                        [[ "$_sip" =~ ^[0-9]+\.[0-9]+ ]] || continue
+                        [[ "$_sip" == "$_sown_ip" ]] && continue
+                        _scan_devs+=("$_sip|$_smac|${_sven:-desconocido}")
+                    done < <(arp-scan --interface="$_sf" --localnet 2>/dev/null \
+                             | grep -E '^[0-9]+\.[0-9]+')
+                fi
+                while read -r _sip _ _ _smac _; do
+                    [[ "$_sip" =~ ^[0-9]+\.[0-9]+ ]] || continue
+                    [[ "$_sip" == "$_sown_ip" ]] && continue
+                    local _sd=false
+                    for _ex in "${_scan_devs[@]}"; do
+                        [[ "${_ex%%|*}" == "$_sip" ]] && _sd=true && break
+                    done
+                    [[ "$_sd" == false ]] && _scan_devs+=("$_sip|${_smac:-??:??:??:??:??:??}|ARP cache")
+                done < <(ip neigh show dev "$_sf" 2>/dev/null \
+                         | awk '$4~/lladdr/{print $1,"dev",$3,"lladdr",$5,$6}')
+
+                printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+                if [[ ${#_scan_devs[@]} -eq 0 ]]; then
+                    printf '  \e[38;5;27m│\e[0m  \e[38;5;240m  Sin dispositivos detectados.                            \e[38;5;27m│\e[0m\n'
+                else
+                    local _si=0
+                    for _sd in "${_scan_devs[@]}"; do
+                        IFS='|' read -r _sdip _sdmac _sdven <<< "$_sd"
+                        if [[ "$_sdip" == "$_sown_ip" ]]; then
+                            printf "  \e[38;5;27m│\e[0m  \e[38;5;240m%-4s\e[0m  \e[38;5;51m%-16s\e[0m  \e[38;5;220m%-20s\e[0m  \e[38;5;240m%-12s\e[38;5;27m│\e[0m\n" \
+                                "${_si})" "$_sdip" "$_sdmac" "$_sdven"
+                        else
+                            printf "  \e[38;5;27m│\e[0m  \e[38;5;46m%-4s\e[0m  \e[38;5;51m%-16s\e[0m  \e[38;5;214m%-20s\e[0m  \e[38;5;240m%-12s\e[38;5;27m│\e[0m\n" \
+                                "${_si})" "$_sdip" "$_sdmac" "$_sdven"
+                        fi
+                        (( _si++ ))
+                    done
+                fi
+                printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
+
+                read -rp "  Número para bloquear (o escribe MAC manual, 0=cancelar): " _msel
+                local mac=""
+                if [[ "$_msel" == "0" ]]; then
+                    unset _scan_devs; continue
+                elif [[ "$_msel" =~ ^[0-9]+$ && "$_msel" -lt "${#_scan_devs[@]}" ]]; then
+                    IFS='|' read -r _ mac _ <<< "${_scan_devs[$_msel]}"
+                elif [[ "$_msel" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+                    mac="$_msel"
+                fi
+                unset _scan_devs
+
                 if [[ "$mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
                     MAC_BLOCKS_STR="${MAC_BLOCKS_STR:+${MAC_BLOCKS_STR},}${mac}"
                     save_config
-                    printf '\n  \e[38;5;46m✓ Guardada. Se aplicará al activar el firewall.\e[0m\n'
-                    sleep 1.2
-                else
-                    printf '\n  \e[31m✗ Formato inválido. Debe ser: XX:XX:XX:XX:XX:XX\e[0m\n'
+                    printf '\n  \e[38;5;46m✓\e[0m  MAC \e[1m%s\e[0m agregada. Activa el firewall para aplicar.\n' "$mac"
                     sleep 1.5
+                else
+                    printf '\n  \e[31m✗\e[0m  Selección inválida.\n'
+                    sleep 1.2
                 fi
                 ;;
             d|D)
