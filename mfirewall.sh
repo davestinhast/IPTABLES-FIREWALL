@@ -1624,6 +1624,31 @@ show_status() {
     fi
 }
 
+show_config_file() {
+    clear
+    printf '\n'
+    printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[1mArchivo de Configuración del Firewall\e[0m\n'
+    printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[38;5;226mRuta:\e[0m  \e[1m\e[38;5;51m%s\e[0m\n' "$CONFIG_FILE"
+    printf '  \e[38;5;27m│\e[0m  \e[2mEste archivo reemplaza /etc/sysconfig/iptables como\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mfuente de verdad de la configuración del firewall.\e[0m\n'
+    printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        printf '  \e[38;5;196m[!]\e[0m  Archivo no encontrado. Activa el firewall primero.\n\n'
+        return
+    fi
+
+    printf '  \e[38;5;239m%s\e[0m\n' "$(printf '%0.s─' $(seq 1 62))"
+    while IFS='=' read -r _k _v; do
+        [[ "$_k" =~ ^# || -z "$_k" ]] && continue
+        printf '  \e[38;5;45m%-20s\e[0m\e[38;5;240m=\e[0m\e[38;5;220m%s\e[0m\n' "$_k" "$_v"
+    done < "$CONFIG_FILE"
+    printf '  \e[38;5;239m%s\e[0m\n\n' "$(printf '%0.s─' $(seq 1 62))"
+    printf '  \e[2mVer en terminal: \e[0m\e[1mcat %s\e[0m\n\n' "$CONFIG_FILE"
+}
+
 show_logs() {
     printf '\n'
     printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
@@ -2421,6 +2446,8 @@ main_menu() {
         printf '  \e[38;5;27m│\e[0m  \e[38;5;45m[6]\e[0m  \e[1mPASO 6\e[0m  \e[38;5;240m—\e[0m  Escanear red y bloquear equipos\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;39m[7]\e[0m  \e[1mPASO 7\e[0m  \e[38;5;240m—\e[0m  Dashboard en vivo  \e[38;5;240m[q] para salir\e[0m\n'
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;220m[c]\e[0m  Ver \e[38;5;51m%s\e[0m\n' "$CONFIG_FILE"
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;196m[8]\e[0m  Desactivar Firewall   \e[38;5;240m│\e[0m  \e[38;5;196m[9]\e[0m  Reset total de red\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;240m[0]\e[0m  Salir\n'
         printf '  \e[38;5;27m╰──────────────────────────────────────────────────────────────╯\e[0m\n'
@@ -2436,6 +2463,7 @@ main_menu() {
             5) show_logs;        read -rp $'\n  Presiona Enter...' ;;
             6) menu_scan_network ;;
             7) show_dashboard ;;
+            c|C) show_config_file; read -rp $'\n  Presiona Enter para volver al menú...' ;;
             8) disable_firewall; read -rp $'\n  Presiona Enter para volver al menú...' ;;
             9) deep_reset;       read -rp $'\n  Presiona Enter...' ;;
             0) printf '\n'; gradient_print "  Hasta luego." GRAD[@] 0; printf '\n\n'; exit 0 ;;
