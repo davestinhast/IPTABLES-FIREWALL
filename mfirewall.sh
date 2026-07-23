@@ -566,6 +566,7 @@ setup_base_chains() {
     iptables -D FORWARD -j PM_MACBLOCK  2>/dev/null || true
     iptables -D FORWARD -j PM_CONNLIMIT 2>/dev/null || true
     iptables -D FORWARD -j PM_WEBBLOCK  2>/dev/null || true
+    iptables -D OUTPUT  -j PM_CONNLIMIT 2>/dev/null || true
     iptables -D OUTPUT  -j PM_WEBBLOCK  2>/dev/null || true
     iptables -D FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
 
@@ -590,6 +591,7 @@ setup_base_chains() {
     cmd iptables -A FORWARD -j PM_MACBLOCK
     cmd iptables -A FORWARD -j PM_CONNLIMIT
     cmd iptables -A FORWARD -j PM_WEBBLOCK
+    cmd iptables -A OUTPUT  -j PM_CONNLIMIT
     cmd iptables -A OUTPUT  -j PM_WEBBLOCK
 
     # ── IPv6: misma estructura — Firefox usa IPv6 para bypassear reglas IPv4 ─────
@@ -1574,6 +1576,7 @@ disable_firewall() {
         iptables -D FORWARD -j PM_MACBLOCK  2>/dev/null || true
         iptables -D FORWARD -j PM_CONNLIMIT 2>/dev/null || true
         iptables -D FORWARD -j PM_WEBBLOCK  2>/dev/null || true
+        iptables -D OUTPUT  -j PM_CONNLIMIT 2>/dev/null || true
         iptables -D OUTPUT  -j PM_WEBBLOCK  2>/dev/null || true
         iptables -t nat -F PREROUTING 2>/dev/null || true
         iptables -t nat -F OUTPUT     2>/dev/null || true
@@ -2243,7 +2246,7 @@ menu_connlimit() {
                     [[ -z "$_nmac" || "$_nmac" == "FAILED" ]] && continue
                     local _already=false
                     for _x in "${_cl_macs[@]}"; do [[ "$_x" == "$_nmac" ]] && _already=true; done
-                    $already && continue
+                    $_already && continue
                     _cl_ips+=("$_nip"); _cl_macs+=("$_nmac"); _cl_vens+=("vecino ARP")
                 done < <(ip neigh show 2>/dev/null | grep -v "^$_cl_own_ip ")
 
