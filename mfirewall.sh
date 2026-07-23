@@ -359,6 +359,11 @@ logsec() {
     printf '\n══ %s ══\n' "$*" >> "$CMD_LOG"
 }
 
+logsub() {
+    [[ -z "$CMD_LOG" ]] && return
+    printf '\n  ── %s ──\n' "$*" >> "$CMD_LOG"
+}
+
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -745,6 +750,56 @@ apply_goog_ranges_iptables() {
 #     e) IPv6:  rangos CIDR del AS15169 de Google en ip6tables
 #     f) ECH:   desactivado via politica enterprise de Firefox
 # =============================================================================
+# Per-site SNI caller — llamado inline después de _animated_block_site
+_apply_sni_site() {
+    local _site="$1"
+    local -a _sni_domains
+    case "$_site" in
+        facebook) _sni_domains=("facebook.com" "fbcdn.net" "fbsbx.com" "messenger.com") ;;
+        youtube)  _sni_domains=("youtube.com" "googlevideo.com" "ytimg.com" "youtu.be" "youtube-nocookie.com") ;;
+        hotmail)  _sni_domains=("hotmail.com" "outlook.com" "microsoftonline.com" "live.com") ;;
+    esac
+    logsub "SNI matching (TLS ClientHello) — iptables lee el dominio en texto plano"
+    local _d
+    for _d in "${_sni_domains[@]}"; do
+        cmd iptables  -A PM_WEBBLOCK -p tcp --dport 443 -m string --string "$_d" --algo bm -j PM_REJECT
+        cmd iptables  -A PM_WEBBLOCK -p tcp --dport 80  -m string --string "$_d" --algo bm -j PM_REJECT
+        ip6tables -A PM_WEBBLOCK -p tcp --dport 443 -m string --string "$_d" --algo bm -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -p tcp --dport 80  -m string --string "$_d" --algo bm -j REJECT 2>/dev/null || true
+    done
+    if [[ "$_site" == "youtube" ]]; then
+        logsub "QUIC/HTTP3 (UDP 443) + rangos CIDR Google CDN"
+        cmd iptables -A PM_WEBBLOCK -p udp --dport 443 -j PM_REJECT
+        ip6tables -A PM_WEBBLOCK -p udp --dport 443 -j REJECT 2>/dev/null || true
+        cmd iptables -A PM_WEBBLOCK -d 34.107.0.0/16 -j PM_REJECT
+        cmd iptables -A PM_WEBBLOCK -d 34.98.0.0/16  -j PM_REJECT
+        ip6tables -A PM_WEBBLOCK -d 2800:3f0::/32  -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -d 2001:4860::/32 -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -d 2607:f8b0::/32 -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -d 2404:6800::/32 -j REJECT 2>/dev/null || true
+        ip6tables -A PM_WEBBLOCK -d 2a00:1450::/32 -j REJECT 2>/dev/null || true
+    fi
+    logc "${_site^} SNI: ${#_sni_domains[@]} dominios"
+}
+
+# Per-site DNS hex caller — llamado inline después de _apply_sni_site
+_apply_dns_site() {
+    local _site="$1"
+    local -a _hex_rules
+    case "$_site" in
+        facebook) _hex_rules=("|08|facebook|03|com" "|05|fbcdn|03|net" "|09|messenger|03|com" "|09|instagram|03|com") ;;
+        youtube)  _hex_rules=("|07|youtube|03|com" "|0b|googlevideo|03|com" "|05|ytimg|03|com" "|06|youtu|02|be") ;;
+        hotmail)  _hex_rules=("|07|hotmail|03|com" "|07|outlook|03|com" "|0f|microsoftonline|03|com" "|04|live|03|com") ;;
+    esac
+    logsub "DNS wire-protocol (port 53) — bloquea la consulta DNS antes de resolver"
+    local _hex
+    for _hex in "${_hex_rules[@]}"; do
+        cmd iptables -A PM_WEBBLOCK -p udp --dport 53 -m string --hex-string "$_hex" --algo bm -j PM_REJECT
+        cmd iptables -A PM_WEBBLOCK -p tcp --dport 53 -m string --hex-string "$_hex" --algo bm -j PM_REJECT
+    done
+    logc "${_site^} DNS: ${#_hex_rules[@]} patrones hex en port 53"
+}
+
 apply_sni_rules() {
     logsec "SNI string-match blocking"
     local sni_fb=("facebook.com" "fbcdn.net" "fbsbx.com" "messenger.com")
@@ -820,6 +875,9 @@ _animated_block_site() {
     local step_n="$1" total="$2" name="$3" set_name="$4" domain_var="$5"
     shift 5
     local rules=("$@")
+
+    logsec "━━━ $name ━━━"
+    logsub "IPs resueltas + ipset"
 
     printf '\n'
 
@@ -1485,9 +1543,9 @@ enable_firewall() {
     printf '\n\n'
 
     # Calcular total de pasos
-    local total=8  # base + ipsets + SNI + DNS-hex + DNS-proxy + hosts + firefox + demo
+    local total=6  # base + DNS-proxy + hosts + firefox + flush + demo
     [[ "$BLOCK_FACEBOOK" == "true" ]] && (( total++ ))
-    [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))  # ipset resolve
+    [[ "$BLOCK_YOUTUBE"  == "true" ]] && (( total++ ))
     [[ "$BLOCK_HOTMAIL"  == "true" ]] && (( total++ ))
     [[ -n "$MAC_BLOCKS_STR" ]]  && (( total++ ))
     [[ -n "$CONN_LIMITS_STR" ]] && (( total++ ))
@@ -1501,19 +1559,24 @@ enable_firewall() {
         (( step++ ))
         _animated_block_site $step $total "Facebook" "PM_FACEBOOK" DOMAINS_FACEBOOK \
             "tcp:80" "tcp:443"
+        _apply_sni_site  facebook
+        _apply_dns_site  facebook
         draw_progress_bar $step $total
     fi
     if [[ "$BLOCK_YOUTUBE" == "true" ]]; then
         (( step++ ))
         _animated_block_site $step $total "YouTube" "PM_YOUTUBE" YT_IPSET_DOMAINS \
             "tcp:80" "tcp:443" "udp:443" "tcp:853:any" "udp:853:any"
+        _apply_sni_site  youtube
+        _apply_dns_site  youtube
         draw_progress_bar $step $total
-
     fi
     if [[ "$BLOCK_HOTMAIL" == "true" ]]; then
         (( step++ ))
         _animated_block_site $step $total "Hotmail" "PM_HOTMAIL" DOMAINS_HOTMAIL \
             "tcp:80" "tcp:443"
+        _apply_sni_site  hotmail
+        _apply_dns_site  hotmail
         draw_progress_bar $step $total
     fi
     if [[ -n "$MAC_BLOCKS_STR" ]]; then
@@ -1524,12 +1587,6 @@ enable_firewall() {
         (( step++ )); run_step $step $total "Aplicando límites de conexión" apply_conn_limits
         draw_progress_bar $step $total
     fi
-
-    (( step++ )); run_step $step $total "Aplicando bloqueo SNI (TLS)" apply_sni_rules
-    draw_progress_bar $step $total
-
-    (( step++ )); run_step $step $total "Bloqueando DNS por dominio (port 53)" apply_dns_block
-    draw_progress_bar $step $total
 
     (( step++ )); run_step $step $total "DNS proxy local (bloqueo garantizado)" setup_dns_proxy
     draw_progress_bar $step $total
