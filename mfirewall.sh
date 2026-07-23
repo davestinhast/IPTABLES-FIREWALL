@@ -896,6 +896,19 @@ _animated_block_site() {
 # DASHBOARD EN VIVO (opción 7)
 # =============================================================================
 show_dashboard() {
+    # Mostrar explicación breve antes de entrar al modo live
+    clear
+    printf '\n'
+    printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[1mPASO 7 — Dashboard en Vivo\e[0m\n'
+    printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[38;5;226m¿Para qué sirve?\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mVista en tiempo real del estado del firewall: sitios\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mbloqueados, reglas iptables activas, MACs, conexiones\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2my paquetes PM-DROP registrados. Presiona [q] para salir.\e[0m\n'
+    printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
+    sleep 1.5
+
     tput smcup  2>/dev/null
     tput civis
     stty -echo  2>/dev/null
@@ -1732,7 +1745,16 @@ show_status() {
 }
 
 show_logs() {
-    printf '\n  \e[1m\e[38;5;51mLogs M-FIREWALL\e[0m\n'
+    printf '\n'
+    printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[1mPASO 5 — Registro de Paquetes Bloqueados\e[0m\n'
+    printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[38;5;226m¿Para qué sirve?\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mMuestra los paquetes rechazados por el firewall.\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2mCada vez que iptables bloquea algo, el kernel escribe\e[0m\n'
+    printf '  \e[38;5;27m│\e[0m  \e[2muna línea "PM-DROP" en el log del sistema (journalctl).\e[0m\n'
+    printf '  \e[38;5;27m╰─────────────────────────────────────────────────────────────╯\e[0m\n\n'
+    printf '  \e[1m\e[38;5;51mLogs M-FIREWALL\e[0m\n'
     printf '  \e[38;5;239m%s\e[0m\n' "$(printf '%0.s─' $(seq 1 50))"
     if [[ -f "$LOG_FILE" ]]; then
         tail -30 "$LOG_FILE" | sed 's/^/  /'
@@ -1847,8 +1869,13 @@ wizard_activate() {
     while true; do
         clear
         printf '\n'
-        gradient_print "  ╭── ACTIVAR FIREWALL  ·  Elige qué bloquear ───────────────────╮" GRAD[@] 0
+        gradient_print "  ╭── PASO 2 — ACTIVAR FIREWALL  ·  Elige qué bloquear ─────────╮" GRAD[@] 0
         printf '\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;226m¿Para qué sirve?\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mActiva las reglas iptables en el kernel. Elige qué sitios\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mbloquear y el firewall aplica todas las capas automáticamente:\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mDNS, SNI, QUIC, IPv6, /etc/hosts y proxy DNS.\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────╮\e[0m\n'
         printf '  \e[38;5;27m│\e[0m\n'
 
         echo -e "  \e[38;5;27m│\e[0m  \e[38;5;51m1)\e[0m  Facebook    [$(toggle_label "$BLOCK_FACEBOOK")]"
@@ -1982,9 +2009,12 @@ menu_mac() {
         clear
         printf '\n'
         printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[1mBloqueo por Dirección MAC\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[2mLos equipos con estas MACs no pueden enviar paquetes\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[2ma través de este servidor (cadena FORWARD).\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mPASO 3 — Bloqueo por Dirección MAC\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;226m¿Para qué sirve?\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mBloquea equipos por su dirección MAC de hardware.\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2miptables lee la MAC del frame Ethernet (módulo xt_mac)\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2my rechaza todos sus paquetes en la cadena FORWARD.\e[0m\n'
         printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
 
         if [[ -n "$MAC_BLOCKS_STR" ]]; then
@@ -2121,8 +2151,12 @@ menu_connlimit() {
         clear
         printf '\n'
         printf '  \e[38;5;27m╭─────────────────────────────────────────────────────────────╮\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[1mLímite de Conexiones Simultáneas                         \e[38;5;27m│\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[2mMax conexiones por IP hacia un puerto. Kernel las cuenta. \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mPASO 4 — Límite de Conexiones Simultáneas                \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;226m¿Para qué sirve?\e[0m                                        \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mLimita cuántas conexiones simultáneas puede abrir cada IP\e[0m \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mhacia un puerto. El kernel cuenta con conntrack — si       \e[0m \e[38;5;27m│\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2msupera el límite, el paquete nuevo se rechaza.            \e[0m \e[38;5;27m│\e[0m\n'
         printf '  \e[38;5;27m├─────────────────────────────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  %-6s  %-6s  %-5s  %-16s  %-10s \e[38;5;27m│\e[0m\n' \
             "PROTO" "PUERTO" "MAX" "IP OBJETIVO" "REGLA"
@@ -2226,8 +2260,12 @@ menu_scan_network() {
         clear
         printf '\n'
         printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[1mEscaneo de Red Local\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[2mDetecta equipos conectados — IP, MAC e identificador\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[1mPASO 6 — Escaneo de Red Local\e[0m\n'
+        printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;226m¿Para qué sirve?\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mDetecta todos los equipos conectados a tu red con su IP\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2my MAC. Desde aquí puedes bloquearlos o limitarlos sin\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[2mescribir nada manualmente — solo elige del listado.\e[0m\n'
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[2mEscaneando...\e[0m\n'
 
@@ -2428,15 +2466,15 @@ main_menu() {
         printf '  \e[38;5;27m╭──────────────────────────────────────────────────────────────╮\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;240m Sigue los pasos en orden para completar la demo            \e[38;5;27m│\e[0m\n'
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m[5]\e[0m  \e[1mPASO 1\e[0m  \e[38;5;240m—\e[0m  Configurar interfaces  \e[38;5;240mWAN / LAN\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;46m[1]\e[0m  \e[1mPASO 2\e[0m  \e[38;5;240m—\e[0m  \e[1mActivar Firewall\e[0m  \e[38;5;240m(elegir sitios a bloquear)\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m[1]\e[0m  \e[1mPASO 1\e[0m  \e[38;5;240m—\e[0m  Configurar interfaces  \e[38;5;240mWAN / LAN\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;46m[2]\e[0m  \e[1mPASO 2\e[0m  \e[38;5;240m—\e[0m  \e[1mActivar Firewall\e[0m  \e[38;5;240m(elegir sitios a bloquear)\e[0m\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;45m[3]\e[0m  \e[1mPASO 3\e[0m  \e[38;5;240m—\e[0m  Bloqueo por MAC address\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;45m[4]\e[0m  \e[1mPASO 4\e[0m  \e[38;5;240m—\e[0m  Límite de conexiones simultáneas\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m[7]\e[0m  \e[1mPASO 5\e[0m  \e[38;5;240m—\e[0m  Ver registro de paquetes  \e[38;5;240m(logs PM-DROP)\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m[9]\e[0m  \e[1mPASO 6\e[0m  \e[38;5;240m—\e[0m  Escanear red y bloquear equipos\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m[6]\e[0m  \e[1mPASO 7\e[0m  \e[38;5;240m—\e[0m  Dashboard en vivo  \e[38;5;240m[q] para salir\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m[5]\e[0m  \e[1mPASO 5\e[0m  \e[38;5;240m—\e[0m  Ver registro de paquetes  \e[38;5;240m(logs PM-DROP)\e[0m\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;45m[6]\e[0m  \e[1mPASO 6\e[0m  \e[38;5;240m—\e[0m  Escanear red y bloquear equipos\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;39m[7]\e[0m  \e[1mPASO 7\e[0m  \e[38;5;240m—\e[0m  Dashboard en vivo  \e[38;5;240m[q] para salir\e[0m\n'
         printf '  \e[38;5;27m├──────────────────────────────────────────────────────────────┤\e[0m\n'
-        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m[2]\e[0m  Desactivar Firewall   \e[38;5;240m│\e[0m  \e[38;5;196m[8]\e[0m  Reset total de red\n'
+        printf '  \e[38;5;27m│\e[0m  \e[38;5;196m[8]\e[0m  Desactivar Firewall   \e[38;5;240m│\e[0m  \e[38;5;196m[9]\e[0m  Reset total de red\n'
         printf '  \e[38;5;27m│\e[0m  \e[38;5;240m[0]\e[0m  Salir\n'
         printf '  \e[38;5;27m╰──────────────────────────────────────────────────────────────╯\e[0m\n'
         printf '\n'
@@ -2444,15 +2482,15 @@ main_menu() {
         read -rp "  Opción: " choice
 
         case "$choice" in
-            1) wizard_activate;  read -rp $'\n  Presiona Enter para volver al menú...' ;;
-            2) disable_firewall; read -rp $'\n  Presiona Enter para volver al menú...' ;;
+            1) menu_interfaces ;;
+            2) wizard_activate;  read -rp $'\n  Presiona Enter para volver al menú...' ;;
             3) menu_mac ;;
             4) menu_connlimit ;;
-            5) menu_interfaces; read -rp $'\n  Presiona Enter...' ;;
-            6) show_dashboard ;;
-            7) show_logs;         read -rp $'\n  Presiona Enter...' ;;
-            9) menu_scan_network ;;
-            8) deep_reset;        read -rp $'\n  Presiona Enter...' ;;
+            5) show_logs;        read -rp $'\n  Presiona Enter...' ;;
+            6) menu_scan_network ;;
+            7) show_dashboard ;;
+            8) disable_firewall; read -rp $'\n  Presiona Enter para volver al menú...' ;;
+            9) deep_reset;       read -rp $'\n  Presiona Enter...' ;;
             0) printf '\n'; gradient_print "  Hasta luego." GRAD[@] 0; printf '\n\n'; exit 0 ;;
             *) printf '  \e[31mOpción inválida.\e[0m\n'; sleep 0.8 ;;
         esac
